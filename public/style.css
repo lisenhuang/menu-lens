@@ -194,3 +194,16 @@ dialog .btn{max-width:100%;white-space:normal}
 #challenge>div{max-width:100%}
 .collection-empty{grid-column:1/-1;background:var(--wash)}
 .collection-empty .btn{margin-top:1rem}
+
+.return-bar{background:var(--wash);border-bottom:1px solid var(--line)}
+.return-bar .shell{padding-block:.48rem}
+.saved-list{display:grid;gap:.65rem;max-width:680px}
+.saved-menu{display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:1rem 1.2rem}
+.saved-menu:hover{border-color:var(--green)}
+.saved-menu strong,.saved-menu small{display:block}
+.saved-menu small{color:var(--muted)}
+.saved-menu [data-icon]{color:var(--green)}
+.progress-panel{max-width:650px}
+.progress-panel .modal-icon{margin-bottom:1rem}
+.progress-panel .inline-actions{margin-top:1.1rem}
+.review-panel{max-width:850px}

@@ -1,12 +1,14 @@
 # Menu Lens
 
-Menu Lens turns a photographed restaurant menu into a dated public menu. Visitors confirm publication and pass Cloudflare Turnstile before uploading. They review the original wording and prices before a background job creates a GPT Image 2.6 Flare illustration for each dish. Publishing happens once every dish image is ready. The site supports System, Light and Dark appearance settings.
+Menu Lens turns a photographed restaurant menu into a dated public menu. Visitors confirm publication and pass Cloudflare Turnstile before uploading. Once the photos finish uploading, visitors can close the tab. Menu reading and dish illustration run on Oracle and resume after a restart. Visitors can reopen a private draft in the same browser from **Your submissions** and review the original wording and prices within 24 hours. After approval, the same link becomes the public menu when every GPT Image 2.6 Flare illustration is ready. The site supports System, Light and Dark appearance settings.
 
 ## Run locally
 
 Use Node.js 24 or newer and run `node server.mjs` from this directory. The site listens at `http://127.0.0.1:8238`. The homepage and public collection work without credentials. For a configured development deployment, pass the ignored runtime environment file with `node --env-file=.env server.mjs`.
 
 The live runtime uses `OPENAI_API_KEY`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` and `TURNSTILE_HOSTNAME`. Optional settings are `OPENAI_IMAGE_MODEL`, `OPENAI_VISION_MODEL`, `DAILY_IMAGE_LIMIT`, `NZ_RESTAURANT_INDEX`, and `GOOGLE_PLACES_API_KEY`. The default queue limit is 120 image requests per rolling 24 hours.
+
+Run `node --test` to exercise background processing, restart recovery, private draft access and publication with isolated provider fixtures.
 
 The offline New Zealand restaurant search uses data from OpenStreetMap. Refresh it with `python3 tools/extract-nz-restaurants.py [geofabrik-pbf] [output-json]` in an environment with the `osmium` package. The downloadable index is licensed under ODbL 1.0. GPS comparison stays on device.
 

@@ -79,13 +79,13 @@ function toast(message) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>{element.hidden=true;},3000);
 }
-async function share() {
+async function share(label='Menu link') {
   const url = location.href.split('#')[0];
   try {
     await navigator.clipboard.writeText(url);
-    toast('Menu link copied');
+    toast(label+' copied');
   } catch {
-    showModal('Share this menu','link',`<label class="field">Menu link<input class="control" value="${escape(url)}" readonly></label>`);
+    showModal(label,'link',`<label class="field">${label}<input class="control" value="${escape(url)}" readonly></label>`);
     dialog.querySelector('input').select();
   }
 }
@@ -180,7 +180,7 @@ async function showMenu(id) {
     ${dates ? `<div class="panel menu-details"><h3>Other menus for this restaurant</h3><ul>${dates}</ul></div>` : ''}
     <a href="/create" class="btn quiet">${icon('plus')} Add a newer menu</a>
     </div>`;
-  $('#share').addEventListener('click',share);
+  $('#share').addEventListener('click',()=>share());
   if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView();
 }
 
@@ -190,7 +190,8 @@ function privacy() {
     `<div class="panel privacy">
       <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, reviewed original text, and AI dish images. It can be browsed or shared by link.</p>
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Review and remove private details before submitting.</p>
-      <p>The original uploaded photo is used to read the menu with OpenAI and is kept out of the public page. Menu Lens holds the photo in memory for that request.</p>
+      <p>The original uploaded photo is used to read the menu with OpenAI and is kept out of the public page. Menu Lens keeps the photos privately for your review. They are removed when you submit the reviewed menu or when the draft expires after 24 hours.</p>
+      <p>Your browser remembers links to recent submissions on this device. Before you approve a menu, only the browser that uploaded it can reopen the draft.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
       <p>Cloudflare Turnstile verifies submissions. Searching in Google Maps sends your query to Google.</p>
       <p>New Zealand restaurant search uses <a class="text-link" href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>. The <a class="text-link" href="/data/nz-restaurants.json">New Zealand restaurant index</a> is available under the Open Database Licence.</p>
@@ -200,7 +201,7 @@ function privacy() {
 const state = {
   step:1, files:[], name:'',address:'',date:localDate(),place:null, position:null,
   confirmed:false, lookup:[], transcript:'', notes:'',dishes:[],warnings:[],read:false,
-  config:null,verified:false,job:null,
+  config:null,verified:false,submissionId:null,
 };
 let flow;
 function buildFlow() {
@@ -219,20 +220,12 @@ function buildFlow() {
     if (state.step===1) updateUpload();
     if (state.step===2) updateLocation();
   }).catch(()=>{state.config={generation:false,places:false};if(state.step===1) updateUpload();});
-  api('/job').then(job=>{
-    if (job?.state==='complete' && state.step===1) {
-      $('#availability').insertAdjacentHTML('afterend',`<p class="hero-note">${icon('check')} <a class="text-link" href="/menu/${escape(job.id)}">View your last published menu</a></p>`);
-    } else if (job && job.state!=='complete') {
-      state.job=job;
-      go(4);
-      monitor();
-    }
-  }).catch(()=>{});
+
 }
 function renderStep() {
-  const labels = ['Photos','Restaurant','Review','Publish'];
+  const labels = ['Photos','Restaurant','Review'];
   flow.innerHTML = `<div class="steps" aria-label="Submission progress">${labels.map((item,i)=>`<span ${state.step===i+1 ? 'aria-current="step"' : ''}><b>${i+1}</b>${item}</span>`).join('')}</div>`;
-  [uploadStep,locationStep,reviewStep,progressStep][state.step-1]();
+  [uploadStep,locationStep,reviewStep][state.step-1]();
 }
 function go(step) {
   state.step=step;
@@ -568,21 +561,21 @@ function consentModal() {
     sync();
     errorAt(error,'');
     $('.modal-close',dialog).disabled=true;
-    read.textContent='Reading your menu…';
+    read.textContent='Uploading photos…';
     dialog.setAttribute('aria-busy','true');
     try {
-      await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,
+      const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,
         locationConfirmed:state.confirmed || !locationCheck().confirm,consent:true,token});
-      const pages=await Promise.all(state.files.map(file=>dataUrl(file.blob)));
-      const output=await api('/read',{pages});
-      state.dishes=output.dishes;
-      state.transcript=output.transcript;
-      state.notes=output.notes;
-      state.warnings=output.warnings;
-      state.verified=true;
-      state.read=true;
-      dialog.close();
-      go(3);
+      const pages=await Promise.all(state.files.map(async file=>{
+        const blob=file.blob || await fetch(file.url).then(response=>{
+          if (!response.ok) throw new Error('Your source photo has expired. Upload the menu again.');
+          return response.blob();
+        });
+        return dataUrl(blob);
+      }));
+      const {id}=await api('/jobs/'+verified.id+'/upload',{pages});
+      remember(id,state.name);
+      location.assign('/menu/'+id);
     } catch(err) {
       errorAt(error,err.message);
       if (widget!==undefined) window.turnstile.reset(widget);
@@ -611,6 +604,7 @@ function reviewStep() {
         <label class="field">Original menu text <textarea class="control" id="transcript" rows="7" maxlength="65000">${escape(state.transcript)}</textarea></label>
       </details>
       <label class="checkbox"><input id="reviewed" type="checkbox">I’ve checked the dishes and prices and removed any personal information.</label>
+      <p class="field-hint">After you submit, you can close this page. Your menu will publish here when every dish image is ready.</p>
       <p class="error" id="review-error" role="alert" hidden></p>
       <div class="form-actions"><button type="button" class="btn text back" id="review-back">${icon('back')} Restaurant</button>
       ${primary('Generate &amp; publish','sparkles','id="publish" disabled')}</div>
@@ -670,13 +664,10 @@ function reviewStep() {
     $('#review-back').disabled=true;
     errorAt($('#review-error'),'');
     try {
-      const result=await api('/publish',{reviewed:reviewed.checked,
+      const result=await api('/jobs/'+state.submissionId+'/publish',{reviewed:reviewed.checked,
         dishes:state.dishes,notes:state.notes,transcript:state.transcript});
-      state.job={id:result.id,state:'queued',completed:0,total:state.dishes.length};
-      for (const file of state.files) URL.revokeObjectURL(file.url);
-      state.files=[];
-      go(4);
-      monitor();
+      remember(result.id,state.name);
+      location.replace('/menu/'+result.id);
     } catch(error) {
       if (error.status===403) {
         state.verified=false;
@@ -693,49 +684,149 @@ function reviewStep() {
   };
 }
 
-function progressStep() {
-  const job=state.job;
-  const finished=job.state==='complete';
-  const failed=job.state==='error';
-  flow.insertAdjacentHTML('beforeend',`
-    <h2>${finished?'Your menu is live':failed?'Your menu is waiting':'Illustrating each dish'}</h2>
-    <p class="muted" aria-live="polite">${finished?'Every dish has an image and the menu is in the public collection.':
-    failed?'The remaining dish images could not be created. Completed images are saved.':
-    job.state==='queued'?'Your menu is in the queue. You can return to this page to check on it.':
-    'The menu will publish automatically once every dish has an image.'}</p>
-    <progress class="progress" value="${job.completed}" max="${job.total}" aria-label="Dish images generated"></progress>
-    <p class="field-hint">${job.completed} of ${job.total} dish images</p>
-    <p class="error" id="job-error" role="alert" hidden></p>
-    <div class="form-actions">${finished?`<a class="btn primary" href="/menu/${escape(job.id)}">${icon('book')} Open published menu</a>`:
-    failed && job.canRetry ? primary('Retry remaining images','sparkles','id="retry"') : ''}</div>`);
-  const retry=$('#retry');
-  if (retry) retry.onclick=async()=>{
-    retry.disabled=true;
-    try {await api('/retry',{});state.job.state='queued';renderStep();monitor();}
-    catch(error) {errorAt($('#job-error'),error.message);retry.disabled=false;}
-  };
+const savedPrefix='menu-lens-submission-';
+function savedSubmissions() {
+  try {
+    return Object.keys(localStorage).filter(key=>key.startsWith(savedPrefix)).flatMap(key=>{
+      try {
+        const item=JSON.parse(localStorage.getItem(key));
+        return /^[a-f0-9]{20}$/.test(item?.id) && typeof item.name==='string' ? [item] : [];
+      } catch {return [];}
+    }).sort((a,b)=>b.saved-a.saved);
+  } catch {return [];}
 }
-let pollTimer;
-function monitor() {
-  clearTimeout(pollTimer);
-  async function poll() {
+function remember(id,name) {
+  try {
+    const key=savedPrefix+id;
+    if (!localStorage.getItem(key)) localStorage.setItem(key,JSON.stringify({id,name,saved:Date.now()}));
+    for (const item of savedSubmissions().slice(20)) localStorage.removeItem(savedPrefix+item.id);
+  } catch {}
+}
+function revealReturnLink() {
+  if (!savedSubmissions().length) return;
+  $('#return-bar').hidden=false;
+}
+async function recoverSubmissions() {
+  // Also recover an upload whose acknowledgement was lost, or a job from an older client.
+  try {
+    const job=await api('/job');
+    if (job) remember(job.id,job.name || 'Your menu');
+  } catch {}
+  revealReturnLink();
+}
+const labels={waiting:'Waiting to read',reading:'Reading the menu',review:'Ready to review',
+  read_error:'Photos need attention',queued:'Waiting for illustrations',running:'Illustrating dishes',
+  error:'Images need attention',complete:'Published'};
+async function submissions() {
+  document.title='Your submissions · Menu Lens';
+  page('Your submissions','MENU LENS','Reopen a menu you started in this browser.',
+    '<div class="saved-list" id="saved-list"><p class="muted">Loading your submissions…</p></div>');
+  await recoverSubmissions();
+  const items=savedSubmissions();
+  const list=$('#saved-list');
+  if (!items.length) {
+    list.innerHTML=`<div class="panel"><h2>No submissions yet</h2><a class="text-link" href="/create">Upload a menu</a></div>`;
+    return;
+  }
+  list.innerHTML=items.map(item=>`<a class="panel saved-menu" href="/menu/${item.id}">
+    <span><strong>${escape(item.name)}</strong><small data-status="${item.id}">Check progress</small></span>${icon('book')}</a>`).join('');
+  await Promise.all(items.map(async item=>{
+    const status=$(`[data-status="${item.id}"]`,list);
     try {
-      const snapshot=await api('/job');
-      if (state.step!==4) return;
-      if (!snapshot) {
-        errorAt($('#job-error'),'Your session expired. Check Explore menus for the published page.');
+      const job=await api('/jobs/'+item.id);
+      status.textContent=labels[job.state];
+    } catch(error) {
+      if (error.status===404) status.textContent='Submission unavailable';
+    }
+  }));
+}
+async function openSubmission(id) {
+  const path='/jobs/'+id;
+  let previous='';
+  let timer;
+  let checking=false;
+  let done=false;
+  const back=pagesBack('/submissions','Your submissions');
+  document.title='Menu progress · Menu Lens';
+  async function refresh() {
+    if (done || checking) return;
+    checking=true;
+    clearTimeout(timer);
+    try {
+      const job=await api(path);
+      if (job.state==='complete') {
+        done=true;
+        return await showMenu(id);
+      }
+      if (job.state==='review') {
+        const output=await api(path+'/review');
+        const {restaurant,date}=job;
+        Object.assign(state,{step:3,submissionId:id,name:restaurant.name,address:restaurant.address,date,
+          place:restaurant.placeId ? {id:restaurant.placeId,name:restaurant.name,address:restaurant.address} : null,
+          confirmed:true,read:true,verified:true,dishes:output.dishes,transcript:output.transcript,
+          notes:output.notes,warnings:output.warnings,files:Array.from({length:output.photoCount},(_,i)=>({
+            name:'Menu page '+(i+1),url:'/api'+path+'/photos/'+i,
+          }))});
+        remember(id,job.name);
+        page(escape(job.name),'MENU REVIEW','Your menu is ready to check. Review it within 24 hours of uploading.',
+          '<section class="panel review-panel" id="flow"></section>',back);
+        document.title='Review '+job.name+' · Menu Lens';
+        flow=$('#flow');
+        renderStep();
+        api('/config').then(config=>{state.config=config;if(state.step===2) updateLocation();}).catch(()=>{});
+        done=true;
         return;
       }
-      const changed=snapshot.state!==state.job.state || snapshot.completed!==state.job.completed;
-      state.job=snapshot;
-      if (changed) renderStep();
-      if (snapshot.state==='complete' || snapshot.state==='error') return;
-    } catch {
-      errorAt($('#job-error'),'Connection interrupted. Reconnecting…');
+      const signature=JSON.stringify(job);
+      if (signature!==previous) {
+        const reading=['waiting','reading'].includes(job.state);
+        const active=reading || ['queued','running'].includes(job.state);
+        const title=reading ? 'Reading your menu' : labels[job.state];
+        const message=reading ? 'You can close this page. Come back in this browser to review the dishes and prices before publishing.' :
+          active ? 'You can close this page. Your menu will publish at this link as soon as every dish has an illustration.' :
+          job.state==='read_error' ? job.error : 'Generation stopped before all the images were ready. Completed illustrations have been saved.';
+        const progress=Number.isInteger(job.total) ? `<progress class="progress" aria-label="Dish images generated" value="${job.completed}" max="${job.total}"></progress>
+          <p class="field-hint">${job.completed} of ${job.total} dish images ready</p>` : '';
+        page(escape(job.name),'MENU SUBMISSION','',`<section class="panel progress-panel">
+          <div class="modal-icon">${icon(reading?'book':'sparkles')}</div><h2>${title}</h2><p class="muted">${escape(message)}</p>
+          ${progress}<p class="error" id="job-error" role="status" hidden></p>
+          <div class="inline-actions"><button class="btn quiet" id="save-link">${icon('link')} Copy return link</button>
+          ${job.canRetry ? primary('Retry remaining images','sparkles','id="retry"') : ''}
+          ${job.state==='read_error' ? '<a class="btn primary" href="/create">Upload new photos</a>' : ''}</div></section>`,back);
+        document.title=title+' · '+job.name+' · Menu Lens';
+        $('#save-link').onclick=()=>share('Return link');
+        if (job.canRetry) $('#retry').onclick=async event=>{
+          const button=event.currentTarget;
+          button.disabled=true;
+          try {await api(path+'/retry',{});done=false;previous='';void refresh();}
+          catch(error) {errorAt($('#job-error'),error.message);button.disabled=false;}
+        };
+        previous=signature;
+        done=!active;
+      }
+      errorAt($('#job-error'),'');
+    } catch(error) {
+      if (error.status===404) {
+        done=true;
+        page('Menu unavailable','MENU LENS','Open private drafts in the browser you used to upload. Drafts expire after 24 hours.',
+          '<a href="/explore" class="btn quiet">Explore published menus</a>',back);
+      } else if ($('#job-error')) {
+        errorAt($('#job-error'),'Connection interrupted. Checking again shortly…');
+      } else {
+        page('Checking your menu','MENU LENS','Reconnecting to your submission…','',back);
+      }
+    } finally {
+      checking=false;
+      if (!done && !document.hidden) timer=setTimeout(refresh,3500);
     }
-    pollTimer=setTimeout(poll,2800);
   }
-  void poll();
+  document.addEventListener('visibilitychange',()=>{
+    clearTimeout(timer);
+    if (!document.hidden) void refresh();
+  });
+  window.addEventListener('pageshow',event=>{if (event.persisted) location.reload();});
+  page('Opening your menu','MENU LENS','','',back);
+  await refresh();
 }
 
 const route = location.pathname.replace(/\/$/,'') || '/';
@@ -743,4 +834,9 @@ if (route==='/') void home();
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();
-else if (route.startsWith('/menu/')) void showMenu(route.split('/')[2]);
+else if (route==='/submissions') void submissions();
+else if (route.startsWith('/menu/')) void openSubmission(route.split('/')[2]);
+if (['/','/create','/explore'].includes(route)) {
+  revealReturnLink();
+  void recoverSubmissions();
+}

@@ -33,7 +33,12 @@ db.exec(`
     menu_id TEXT NOT NULL REFERENCES menus(id), position INTEGER NOT NULL, image BLOB NOT NULL,
     PRIMARY KEY (menu_id, position)
   );
+  CREATE TABLE IF NOT EXISTS drafts (
+    id TEXT PRIMARY KEY, owner TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+    state TEXT NOT NULL, pages TEXT NOT NULL, result TEXT, error TEXT
+  );
   UPDATE menus SET state='queued' WHERE state='running';
+  UPDATE drafts SET state='waiting' WHERE state='reading';
 `);
 
 if (!db.prepare('PRAGMA table_info(sessions)').all().some(column=>column.name==='read_success')) {
@@ -121,6 +126,26 @@ function session(req, required=true) {
   return row;
 }
 
+// Each upload keeps its own HttpOnly cookie, so a second submission cannot displace it.
+const submissionId = owner => sha('menu-lens/submission/'+owner).slice(0,20);
+function jobOwner(req) {
+  const token = req.headers.cookie?.match(/(?:^|;\s*)ml_job=([a-f0-9]{64})(?:;|$)/)?.[1];
+  return token ? sha(token) : session(req,false)?.id;
+}
+function privateDraft(id, owner) {
+  const draft = owner && db.prepare(`SELECT drafts.state, sessions.details, drafts.error
+    FROM drafts JOIN sessions ON sessions.id=drafts.owner
+    WHERE drafts.id=? AND drafts.owner=? AND sessions.expires>?`).get(id,owner,Date.now());
+  if (!draft) throw new RequestError(404,'This submission is unavailable. Open it in the browser you used to upload.');
+  return draft;
+}
+function jobStatus(row, owner) {
+  const payload = JSON.parse(row.payload);
+  const completed = db.prepare('SELECT count(*) AS count FROM dish_images WHERE menu_id=?').get(row.id).count;
+  return {id:row.id,name:payload.restaurant.name,state:row.state,completed,total:payload.dishes.length,
+    canRetry:row.state==='error' && row.owner===owner && row.attempts<3};
+}
+
 function details(body) {
   const name = clean(body.name,180,'Restaurant name');
   const address = clean(body.address,400,'Restaurant address');
@@ -170,6 +195,32 @@ function publicMenu(row) {
 }
 
 const pendingLimit = 3;
+let readingDrafts = false;
+async function readDrafts() {
+  if (readingDrafts || !ready) return;
+  readingDrafts = true;
+  try {
+    let draft;
+    while ((draft=db.prepare(`SELECT drafts.id, drafts.pages FROM drafts JOIN sessions ON sessions.id=drafts.owner
+      WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
+      db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
+      try {
+        const output = await readMenu(JSON.parse(draft.pages));
+        if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
+        db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
+      } catch (error) {
+        const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
+        db.prepare("UPDATE drafts SET state='read_error', error=?, pages='[]' WHERE id=?").run(message,draft.id);
+      }
+    }
+  } finally {
+    readingDrafts = false;
+  }
+}
+function queueReading() {
+  void readDrafts().catch(error=>console.error('Menu reading queue failed',error.name));
+}
+queueReading();
 let working = false;
 async function runQueue() {
   if (working) return;
@@ -212,6 +263,98 @@ setInterval(()=>{
   db.prepare("DELETE FROM menus WHERE state='error' AND created<?").run(cutoff);
 },3_600_000).unref();
 
+function validatePages(body) {
+  if (!Array.isArray(body.pages) || !body.pages.length || body.pages.length>6 || body.pages.some(page=>(
+    typeof page !== 'string' || page.length>3_000_000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]+={0,2}$/.test(page)
+  ))) throw new RequestError(400,'Upload between one and six readable menu photos.');
+}
+function reserveRead(owner) {
+  if (!db.prepare('UPDATE sessions SET reads=reads+1 WHERE id=? AND reads<3').run(owner).changes || !rate('reading:daily',45,86_400_000)) {
+    throw new RequestError(429,'The menu reading limit has been reached. Please try again later.');
+  }
+}
+function checkImageQueue() {
+  const outstanding = db.prepare("SELECT count(*) AS count FROM menus WHERE state IN ('queued','running')").get().count;
+  if (outstanding>=pendingLimit) throw new RequestError(429,'The image queue is full. Please try again in a few minutes.');
+}
+async function publish(req,res,id,owner,fromDraft) {
+  const existing = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
+  if (existing) return write(res,202,existing);
+  limit(req,'publish',5,86_400);
+  const body = await json(req);
+  if (body.reviewed !== true) throw new RequestError(403,'Review the original menu information before publishing.');
+  const {date,restaurant,consentAt} = JSON.parse(owner.details);
+  const payload = {...menuText(body),restaurant,consentAt};
+  const duplicate = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
+  if (duplicate) return write(res,202,duplicate);
+  if (fromDraft ? privateDraft(id,owner.id).state!=='review' : !owner.read_success) {
+    throw new RequestError(403,'Read the uploaded menu before publishing.');
+  }
+  checkImageQueue();
+  db.exec('BEGIN');
+  try {
+    db.prepare("INSERT INTO menus (id,owner,restaurant_key,date,created,payload,state) VALUES (?,?,?,?,?,?,'queued')")
+      .run(id,owner.id,restaurant.key,date,new Date().toISOString(),JSON.stringify(payload));
+    db.prepare('DELETE FROM drafts WHERE owner=?').run(owner.id);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  queue();
+  return write(res,202,{id});
+}
+function retryImages(req,res,id,owner) {
+  limit(req,'retry',6,600);
+  checkImageQueue();
+  const retried = db.prepare("UPDATE menus SET state='queued', attempts=attempts+1 WHERE id=? AND owner=? AND state='error' AND attempts<3").run(id,owner);
+  if (!retried.changes) throw new RequestError(409,'This menu cannot be retried right now.');
+  queue();
+  return write(res,202,{ok:true});
+}
+
+async function jobApi(req,res,id,action) {
+  const owner = jobOwner(req);
+  const row = db.prepare('SELECT * FROM menus WHERE id=?').get(id);
+  if (req.method==='GET') {
+    if (!action && row) return write(res,200,jobStatus(row,owner));
+    const draft = privateDraft(id,owner);
+    if (!action) {
+      const {restaurant,date} = JSON.parse(draft.details);
+      return write(res,200,{id,name:restaurant.name,restaurant,date,state:draft.state,error:draft.error});
+    }
+    if (action==='review' && draft.state==='review') {
+      const result = db.prepare('SELECT result,json_array_length(pages) AS photoCount FROM drafts WHERE id=?').get(id);
+      return write(res,200,{...JSON.parse(result.result),photoCount:result.photoCount});
+    }
+    if (/^photos\/[0-5]$/.test(action) && draft.state==='review') {
+      const photo = db.prepare('SELECT json_extract(pages,?) AS page FROM drafts WHERE id=?').get('$['+action.slice(7)+']',id).page;
+      if (photo) return write(res,200,Buffer.from(photo.split(',')[1],'base64'),'image/jpeg');
+    }
+  } else if (req.method==='POST') {
+    if (!ready) throw new RequestError(503,statusText);
+    if (!owner || (row ? row.owner!==owner : submissionId(owner)!==id)) throw new RequestError(403,'Open this submission in the browser you used to upload.');
+    if (row && action==='retry') return retryImages(req,res,id,owner);
+    if (row && ['publish','upload'].includes(action)) return write(res,202,{id});
+    const active = db.prepare('SELECT * FROM sessions WHERE id=? AND expires>?').get(owner,Date.now());
+    if (!active) throw new RequestError(403,'Your upload has expired. Start a new submission.');
+    if (action==='publish') return publish(req,res,id,active,true);
+    if (action==='upload') {
+      limit(req,'read',9,86_400);
+      const body = await json(req,16_000_000);
+      if (db.prepare('SELECT id FROM drafts WHERE id=? UNION ALL SELECT id FROM menus WHERE id=?').get(id,id)) return write(res,202,{id});
+      validatePages(body);
+      const outstanding = db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('waiting','reading')").get().count;
+      if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
+      reserveRead(owner);
+      db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'waiting',?)").run(id,owner,JSON.stringify(body.pages));
+      queueReading();
+      return write(res,202,{id});
+    }
+  }
+  throw new RequestError(404,'This page could not be found.');
+}
+
 async function api(req,res,path) {
   const get = req.method === 'GET';
   if (path === '/api/config' && get) return write(res,200,{
@@ -228,11 +371,14 @@ async function api(req,res,path) {
     if (!row) throw new RequestError(404,'This menu could not be found.');
     return write(res,200,publicMenu(row));
   }
+  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(review|upload|publish|retry|photos\/[0-5]))?$/);
+  if (job) return jobApi(req,res,job[1],job[2]);
   if (path === '/api/job' && get) {
     const owner = session(req,false);
     const row = owner && db.prepare('SELECT * FROM menus WHERE owner=?').get(owner.id);
-    const completed = row && db.prepare('SELECT count(*) AS count FROM dish_images WHERE menu_id=?').get(row.id).count;
-    return write(res,200,row ? {id:row.id,state:row.state,completed,total:JSON.parse(row.payload).dishes.length,canRetry:row.attempts<3} : null);
+    if (row) return write(res,200,jobStatus(row,owner.id));
+    const draft = owner && db.prepare('SELECT id FROM drafts WHERE owner=?').get(owner.id);
+    return write(res,200,draft ? {...draft,name:JSON.parse(owner.details).restaurant.name} : null);
   }
   if (req.method !== 'POST') throw new RequestError(404,'This page could not be found.');
   if (path === '/api/places') {
@@ -261,48 +407,27 @@ async function api(req,res,path) {
     const token = randomBytes(32).toString('hex');
     db.prepare('INSERT INTO sessions(id,expires,details) VALUES (?,?,?)').run(sha(token),Date.now()+86_400_000,JSON.stringify(info));
     const secure = liveOrigin.startsWith('https:') ? '; Secure' : '';
-    return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_session=${token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=86400${secure}`});
+    const id = submissionId(sha(token));
+    return write(res,200,{ok:true,id},undefined,{'Set-Cookie':[
+      `ml_session=${token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=86400${secure}`,
+      `ml_job=${token}; Path=/api/jobs/${id}; HttpOnly; SameSite=Strict; Max-Age=2592000${secure}`,
+    ]});
   }
   const owner = session(req);
   if (path === '/api/read') {
     limit(req,'read',9,86_400);
     const body = await json(req,16_000_000);
-    if (!Array.isArray(body.pages) || !body.pages.length || body.pages.length>6 || body.pages.some(page=>(
-      typeof page !== 'string' || page.length>3_000_000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]+={0,2}$/.test(page)
-    ))) throw new RequestError(400,'Upload between one and six readable menu photos.');
-    if (!db.prepare('UPDATE sessions SET reads=reads+1 WHERE id=? AND reads<3').run(owner.id).changes || !rate('reading:daily',45,86_400_000)) {
-      throw new RequestError(429,'The menu reading limit has been reached. Please try again later.');
-    }
+    validatePages(body);
+    reserveRead(owner.id);
     const output = await readMenu(body.pages);
     if (!output.isMenu) throw new RequestError(422,'This does not look like a restaurant menu. Upload clear photos of the menu.');
     db.prepare('UPDATE sessions SET read_success=1 WHERE id=?').run(owner.id);
     return write(res,200,output);
   }
-  if (path === '/api/publish') {
-    const existing = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
-    if (existing) return write(res,202,existing);
-    if (!owner.read_success) throw new RequestError(403,'Read the uploaded menu before publishing.');
-    limit(req,'publish',5,86_400);
-    const body = await json(req);
-    if (body.reviewed !== true) throw new RequestError(403,'Review the original menu information before publishing.');
-    const {date,restaurant,consentAt} = JSON.parse(owner.details);
-    const payload = {...menuText(body),restaurant,consentAt};
-    const outstanding = db.prepare("SELECT count(*) AS count FROM menus WHERE state IN ('queued','running')").get().count;
-    if (outstanding>=pendingLimit) throw new RequestError(429,'The image queue is full. Please try again in a few minutes.');
-    const id = randomBytes(10).toString('hex');
-    const saved = db.prepare("INSERT OR IGNORE INTO menus VALUES (?,?,?,?,?,?,'queued',0)")
-      .run(id, owner.id, restaurant.key, date, new Date().toISOString(), JSON.stringify(payload));
-    if (!saved.changes) return write(res,202,db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id));
-    queue();
-    return write(res,202,{id});
-  }
-  limit(req,'retry',6,600);
-  const outstanding = db.prepare("SELECT count(*) AS count FROM menus WHERE state IN ('queued','running')").get().count;
-  if (outstanding>=pendingLimit) throw new RequestError(429,'The image queue is full. Please try again in a few minutes.');
-  const retried = db.prepare("UPDATE menus SET state='queued', attempts=attempts+1 WHERE owner=? AND state='error' AND attempts<3").run(owner.id);
-  if (!retried.changes) throw new RequestError(409,'This menu cannot be retried right now.');
-  queue();
-  return write(res,202,{ok:true});
+  if (path === '/api/publish') return publish(req,res,submissionId(owner.id),owner,false);
+  const previous = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
+  if (!previous) throw new RequestError(404,'This menu could not be found.');
+  return retryImages(req,res,previous.id,owner.id);
 }
 
 const server = createServer(async (req,res)=>{
@@ -336,11 +461,14 @@ const server = createServer(async (req,res)=>{
     if (path==='/menu/osteria-verde') return write(res,301,'',mime.html,{Location:'/explore'});
     const parts = path.split('/');
     const id = parts.length===3 && parts[1]==='menu' ? parts[2] : '';
-    if (['/','/create','/explore','/privacy'].includes(path) || publicId.test(id)) {
+    if (['/','/create','/explore','/privacy','/submissions'].includes(path) || publicId.test(id)) {
       let html = document;
       if (id) {
         const row = db.prepare("SELECT * FROM menus WHERE id=? AND state='complete'").get(id);
-        if (!row) return write(res,404,document,mime.html);
+        if (!row) {
+          const pending = db.prepare('SELECT id FROM menus WHERE id=? UNION ALL SELECT id FROM drafts WHERE id=?').get(id,id);
+          return write(res,pending ? 200 : 404,document,mime.html,{'X-Robots-Tag':'noindex'});
+        }
         const summary = card(row);
         html = document.replace('<meta property="og:title" content="Menu Lens">', () => `<meta property="og:title" content="${escape(summary.restaurant.name)} · Menu Lens">`)
           .replace('https://menu.9l.nz/images/hero.webp', `https://menu.9l.nz${summary.cover}`);
