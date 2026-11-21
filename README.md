@@ -22,15 +22,15 @@ flowchart TD
     B --> C{"Does every dish already have a photo?"}
     B -->|"Unreadable or unrelated"| R["Keep photos private for retry"]
     C -->|Yes| S["Stop and discard the uploaded photos"]
-    C -->|No| D["Generate one illustration per dish"]
+    C -->|No| D["Generate dish illustrations concurrently"]
     D --> E["First photo opens the public menu"]
     E --> F["Stream each new photo into the menu"]
 ```
 
 1. **Submit.** The diner selects one to six photos, chooses the restaurant and date, then selects **Generate & publish**. The browser converts the pages to JPEGs. After Cloudflare Turnstile verifies the submission, the server saves the photos in R2 and queues the job in SQLite. Once the upload finishes, the diner can close the tab.
-2. **Transcribe.** The server sends all pages together to OpenAI’s Responses API. It requests structured JSON containing the menu text, notes, warnings and dishes in printed order. Each dish has a section, name, description, price and `hasDishPhoto` flag. If reading fails, the uploader can retry from the same browser within 24 hours, up to three reading attempts in total.
+2. **Transcribe.** The server sends all pages of a menu together to OpenAI’s Responses API so the reader can match dishes and photos across pages. By default, two separate menus can be read at the same time. It requests structured JSON containing the menu text, notes, warnings and dishes in printed order. Each dish has a section, name, description, price and `hasDishPhoto` flag. If reading fails, the uploader can retry from the same browser within 24 hours, up to three reading attempts in total.
 3. **Check photo coverage.** If every dish has a matching photo, processing stops and the uploaded pages are discarded. If even one dish lacks a matching photo, every dish on the menu gets an AI illustration, including dishes that already have photos.
-4. **Illustrate.** Each image request uses the dish name and description. The worker processes up to two dishes at a time and saves each 1024 × 1024 WebP to R2. If generation stops partway through, a retry resumes with the missing images.
+4. **Illustrate.** Each image request uses the dish name and description. By default the server illustrates up to four dishes at once across all menus. As each 1024 × 1024 WebP is saved to R2, its slot becomes available to the next dish. Waiting menus take turns. If a dish fails, other images already in progress for that menu can finish, and a retry picks up only the missing images.
 5. **Publish.** The first saved illustration puts the menu in the public collection with dish names and printed prices. The server renders the current menu and streams each new photo into its dish card. Original menu pages become public after the last illustration finishes.
 
 ## Worked example: French toast at MIBO
@@ -97,6 +97,7 @@ node --test
 | Connect storage | Deploy `storage/wrangler.jsonc` with its private R2 bucket. Set the same random secret as `STORAGE_SECRET` on the Worker and `R2_GATEWAY_SECRET` on the server. Set `R2_GATEWAY_URL` to the Worker route, including its trailing slash. |
 | Configure AI | In `/admin`, choose the menu-reading model and its thinking level, or change the dish image model and quality. Private history records each request and its estimated cost. The server reads `ADMIN_PIN_VERIFIER` from its private environment. |
 | Runtime defaults | `OPENAI_IMAGE_MODEL=gpt-image-2.6-sunburst` at high quality, `OPENAI_VISION_MODEL=gpt-6.1-terra` with medium reasoning. |
+| Tune concurrency | Set `MENU_IMAGE_CONCURRENCY` (1–8, default 4) and `MENU_READ_CONCURRENCY` (1–3, default 2) to suit the server’s memory and API rate limits. Both limits apply across all menus on the server. |
 | Record visitor cities | The admin history pairs the displayed IP with its approximate city from Cloudflare’s `CF-IPCity` request header. Enable **Add visitor location headers** in Cloudflare for the origin to receive it. |
 | Find restaurants | Set a server-side `GOOGLE_PLACES_API_KEY` for Google Places Text Search (New). Search also supports an OpenStreetMap index (`NZ_RESTAURANT_INDEX`) and restaurant-published branch directories. GPS comparisons stay on the device. |
 | Deploy to Oracle | Set `MENU_ORACLE_HOST` and optionally `MENU_ORACLE_IDENTITY`, then run `./deploy.sh`. Cloudflare Tunnel serves the site. SQLite stores records in `menu-lens-data`. Cloudflare R2 stores originals, dish images, site assets and the restaurant index. |

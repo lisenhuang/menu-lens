@@ -27,6 +27,7 @@ test('private uploads and approved illustrations finish with no client connected
   const objects=new Map();
   let visionResult=menu;
   let readingRequest,imageRequest;
+  const imageGates=new Map();
   let imageFails=true;
   let holdImages=true;
   let holdBread=false;
@@ -81,10 +82,18 @@ test('private uploads and approved illustrations finish with no client connected
     } else if (req.url==='/v1/images/generations') {
       imageRequest=JSON.parse(body);
       imageCalls++;
-      const bread=imageRequest.prompt.includes('"name":"Bread"');
+      const {prompt}=imageRequest;
+      const bread=prompt.includes('"name":"Bread"');
       while ((holdImages || (holdBread && bread)) && !res.destroyed) await delay(10);
+      for (const [name,gate] of imageGates) {
+        if (prompt.includes('"name":'+JSON.stringify(name))) {
+          gate.calls++;
+          res.statusCode=await gate.promise;
+          break;
+        }
+      }
       if (imageFails) res.statusCode=503;
-      response=imageFails ? {error:{}} : {data:[{b64_json:webpFixture}],usage:{input_tokens:200,output_tokens:1200}};
+      response=res.statusCode!==200 ? {error:{}} : {data:[{b64_json:webpFixture}],usage:{input_tokens:200,output_tokens:1200}};
     } else throw new Error('Unhandled test provider path');
     res.end(JSON.stringify(response));
   });
@@ -124,7 +133,7 @@ test('private uploads and approved illustrations finish with no client connected
       new URL(new URL(url).pathname,'http://127.0.0.1:${providerPort}'),options);`;
     child=fork(new URL('../server.mjs',import.meta.url),[],{
       silent:true,execArgv:['--import','data:text/javascript,'+encodeURIComponent(preload)],
-      env:{...process.env,R2_GATEWAY_URL:'http://localhost/__storage/',R2_GATEWAY_SECRET:'test-storage',OPENAI_IMAGE_MODEL:'',OPENAI_VISION_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
+      env:{...process.env,MENU_IMAGE_CONCURRENCY:'',MENU_READ_CONCURRENCY:'',R2_GATEWAY_URL:'http://localhost/__storage/',R2_GATEWAY_SECRET:'test-storage',OPENAI_IMAGE_MODEL:'',OPENAI_VISION_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
         OPENAI_API_KEY:'test',GOOGLE_PLACES_API_KEY:'test',TURNSTILE_SECRET:'test',TURNSTILE_SITE_KEY:'test',TURNSTILE_HOSTNAME:'localhost',TURNSTILE_TEST:'0',ADMIN_PIN_VERIFIER:verifier,TRUST_CLOUDFLARE:'1'},
     });
     await until(()=>fetch(origin+'/healthz').then(r=>r.ok).catch(()=>false));
@@ -156,9 +165,9 @@ test('private uploads and approved illustrations finish with no client connected
       },
     };
   }
-  async function verify(name,restaurantPin,autoPublish=false) {
+  async function verify(name,restaurantPin,autoPublish=false,ip) {
     const r=await request('/api/verify','',{name,address:'Example Street',date:'2025-01-01',
-      pin:restaurantPin,autoPublish,consent:true,shareOriginals:true,token:'test'});
+      pin:restaurantPin,autoPublish,consent:true,shareOriginals:true,token:'test'},ip);
     assert.equal(r.status,200);
     const {id}=await r.json();
     const cookie=r.headers.getSetCookie().find(value=>value.startsWith('ml_job=')).split(';')[0];
@@ -525,6 +534,73 @@ test('private uploads and approved illustrations finish with no client connected
     const before=addressRequests;
     assert.equal((await request('/api/verify','',{name:'Bot',address:'Auckland',date:'2025-01-01',consent:true,shareOriginals:true,token:''},ip)).status,403);
     assert.equal(addressRequests,before);
+  });
+  await t.test('menus share rolling image and transcription slots and retry only missing dishes',async t=>{
+    addressReply=null;
+    visionResult=menu;
+    const ip='192.0.2.210';
+    const uploads=[];
+    const status=async job=>(await request('/api/jobs/'+job.id,job.cookie)).json();
+    const post=(job,action,body)=>request('/api/jobs/'+job.id+'/'+action,job.cookie,body,ip);
+    const before=readCalls;
+    holdRead=true;
+    for (const name of ['Large','Small','Third']) {
+      const job=await verify(name,undefined,false,ip);
+      uploads.push(job);
+      assert.equal((await post(job,'upload',{pages:[photo,photo]})).status,202);
+    }
+    await until(()=>readCalls===before+2);
+    assert.equal((await status(uploads[2])).state,'waiting');
+    assert.equal(readingRequest.input[0].content.filter(item=>item.type==='input_image').length,2);
+    holdRead=false;
+    for (const job of uploads) await until(async()=>(await status(job)).state==='review');
+    assert.equal(readCalls,before+3);
+
+    const [large,small]=uploads;
+    const largeNames=Array.from({length:8},(_,i)=>'Large dish '+i);
+    const smallName='Small dish';
+    function gate(name) {
+      const control={...Promise.withResolvers(),calls:0};
+      imageGates.set(name,control);
+      return control;
+    }
+    const gates=largeNames.map(gate);
+    const smallGate=gate(smallName);
+    t.after(()=>{for (const control of imageGates.values()) control.resolve(200);});
+    const publish=(job,names)=>post(job,'publish',{...menu,reviewed:true,
+      dishes:names.map(name=>({...menu.dishes[0],name}))});
+    assert.equal((await publish(large,largeNames)).status,202);
+    await until(()=>gates.slice(0,4).every(control=>control.calls===1));
+    assert.equal((await publish(small,[smallName])).status,202);
+    assert.equal(smallGate.calls,0);
+    assert.equal((await status(small)).state,'queued');
+    assert.deepEqual((await status(large)).activePositions,[0,1,2,3]);
+
+    // Dishes 0 and 3 stay in flight. Two freed slots serve both menus.
+    gates[1].resolve(200);
+    gates[2].resolve(200);
+    await until(()=>gates[4].calls===1 && smallGate.calls===1);
+    assert.deepEqual((await status(large)).readyPositions,[1,2]);
+    assert.deepEqual((await status(large)).activePositions,[0,3,4]);
+    gates[4].resolve(503);
+    await until(async()=>!(await status(large)).activePositions.includes(4));
+    assert.equal((await status(large)).state,'running');
+    smallGate.resolve(200);
+    await until(async()=>(await status(small)).state==='complete');
+    gates[0].resolve(200);
+    gates[3].resolve(200);
+    await until(async()=>(await status(large)).state==='error');
+    assert.deepEqual((await status(large)).readyPositions,[0,1,2,3]);
+    assert.deepEqual(gates.map(control=>control.calls),[1,1,1,1,1,0,0,0]);
+
+    const retry=gate(largeNames[4]);
+    for (const control of imageGates.values()) control.resolve(200);
+    assert.equal((await post(large,'retry',{})).status,202);
+    await until(async()=>(await status(large)).state==='complete');
+    assert.equal(retry.calls,1);
+    assert.deepEqual(gates.map(control=>control.calls),[1,1,1,1,1,1,1,1]);
+    const published=await (await request('/api/menus/'+large.id)).json();
+    assert.deepEqual(published.dishes.map(d=>d.name),largeNames);
   });
   assert.equal((await request('/fonts/dm-sans-OFL.txt')).status,200);
   assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);

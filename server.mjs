@@ -204,14 +204,14 @@ function privateDraft(id, owner) {
   if (!draft) throw new RequestError(404,'This submission is unavailable. Open it in the browser you used to upload.');
   return draft;
 }
-const activeDishes=new Map();
+const imageJobs=new Map();
 function savedPositions(id) {
   return db.prepare('SELECT position FROM dish_objects WHERE menu_id=? ORDER BY position').all(id).map(row=>row.position);
 }
 function jobStatus(row,owner) {
   const {restaurant,dishes}=JSON.parse(row.payload);
   const readyPositions=savedPositions(row.id);
-  const activePositions=[...(activeDishes.get(row.id) || [])];
+  const activePositions=[...(imageJobs.get(row.id)?.active || [])];
   return {id:row.id,name:restaurant.name,state:row.state,completed:readyPositions.length,total:dishes.length,
     readyPositions,activePositions,illustrating:activePositions.map(i=>dishes[i].name),
     canRetry:row.state==='error' && row.owner===owner && row.attempts<3};
@@ -398,39 +398,55 @@ function publicMenu(row) {
 
 const pendingLimit = 3;
 const maxReadAttempts=3;
-let readingDrafts = false;
-async function readDrafts() {
-  if (readingDrafts || !ready) return;
-  readingDrafts = true;
-  try {
-    let draft;
-    while ((draft=db.prepare(`SELECT drafts.*, sessions.details FROM drafts JOIN sessions ON sessions.id=drafts.owner
-      WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
-      db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
-      notifyProgress(draft.id);
-      try {
-        const pages=await Promise.all(JSON.parse(draft.pages).map(async key=>
-          'data:image/jpeg;base64,'+(await getObject(key)).toString('base64')));
-        const output=await readForRun(draft.id,pages,draft.read_ip);
-        if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
-        if (output.dishes.length && output.dishes.every(dish=>dish.hasDishPhoto===true)) {
-          discardIllustratedDraft(draft,'Every dish on this menu already has a photo. No dish illustrations were generated.');
-          continue;
-        }
-        if (JSON.parse(draft.details).autoPublish) {
-          enqueueMenu(draft,output,draft.read_ip);
-        } else {
-          db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
-          notifyProgress(draft.id);
-        }
-      } catch (error) {
-        const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
-        db.prepare("UPDATE drafts SET state='read_error',error=? WHERE id=?").run(message,draft.id);
-        notifyProgress(draft.id);
-      }
+// Each completion immediately frees a slot, even when another request is slow.
+function workerPool(limit,nextTask) {
+  let busy=0;
+  return function fill() {
+    if (!ready) return;
+    while (busy<limit) {
+      const task=nextTask();
+      if (!task) break;
+      busy++;
+      task().catch(error=>console.error('Menu worker failed',error.name)).finally(()=>{
+        busy--;
+        fill();
+      });
     }
-  } finally {
-    readingDrafts = false;
+  };
+}
+
+function concurrency(value,fallback,max) {
+  const n=Number(value);
+  return Number.isInteger(n) && n>=1 && n<=max ? n : fallback;
+}
+
+const queueReading=workerPool(concurrency(environment.MENU_READ_CONCURRENCY,2,pendingLimit),()=>{
+  const draft=db.prepare(`SELECT drafts.*, sessions.details FROM drafts JOIN sessions ON sessions.id=drafts.owner
+    WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now());
+  if (!draft) return;
+  db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
+  notifyProgress(draft.id);
+  return ()=>readDraft(draft);
+});
+
+async function readDraft(draft) {
+  try {
+    const pages=await Promise.all(JSON.parse(draft.pages).map(async key=>
+      'data:image/jpeg;base64,'+(await getObject(key)).toString('base64')));
+    const output=await readForRun(draft.id,pages,draft.read_ip);
+    if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
+    if (output.dishes.length && output.dishes.every(dish=>dish.hasDishPhoto===true)) {
+      discardIllustratedDraft(draft,'Every dish on this menu already has a photo. No dish illustrations were generated.');
+    } else if (JSON.parse(draft.details).autoPublish) {
+      enqueueMenu(draft,output,draft.read_ip);
+    } else {
+      db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
+      notifyProgress(draft.id);
+    }
+  } catch (error) {
+    const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
+    db.prepare("UPDATE drafts SET state='read_error',error=? WHERE id=?").run(message,draft.id);
+    notifyProgress(draft.id);
   }
 }
 function discardIllustratedDraft(draft,message) {
@@ -452,61 +468,69 @@ async function cleanObjects() {
   } catch(error) {console.error('Object cleanup deferred',error.name);}
 }
 void cleanObjects();
-function queueReading() {
-  void readDrafts().catch(error=>console.error('Menu reading queue failed',error.name));
-}
-queueReading();
-let working = false;
-async function runQueue() {
-  if (working) return;
-  working = true;
-  try {
-    let row;
-    while ((row=db.prepare("SELECT * FROM menus WHERE state='queued' ORDER BY created LIMIT 1").get())) {
-      db.prepare("UPDATE menus SET state='running' WHERE id=?").run(row.id);
-      notifyProgress(row.id);
-      const {dishes,imageSettings} = JSON.parse(row.payload);
-      const imageConfig = imageSettings || {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium'};
-      const done = new Set(db.prepare('SELECT position FROM dish_objects WHERE menu_id=?').all(row.id).map(item=>item.position));
-      const remaining = dishes.map((dish,i)=>({dish,i})).filter(item=>!done.has(item.i));
-      const active=new Set();
-      activeDishes.set(row.id,active);
-      try {
-        for (let i=0;i<remaining.length;i+=2) {
-          const results = await Promise.allSettled(remaining.slice(i,i+2).map(async item=>{
-            try {
-              const key=dishKey(row.id,item.i);
-              // A restart can land between a successful R2 write and its SQLite checkpoint.
-              if (!await objectExists(key)) {
-                const bytes=await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,received=>{
-                  active.add(item.i);
-                  notifyProgress(row.id);
-                  return generateDish(item.dish,imageConfig,received);
-                });
-                await putObject(key,bytes,'image/webp');
-              }
-              db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
-            } finally {
-              active.delete(item.i);
-              notifyProgress(row.id);
-            }
-          }));
-          if (results.some(result=>result.status==='rejected')) throw new Error('Image batch unfinished');
-        }
-        db.prepare("UPDATE menus SET state='complete',created=? WHERE id=?").run(new Date().toISOString(),row.id);
-      } catch {
-        db.prepare("UPDATE menus SET state='error' WHERE id=?").run(row.id);
-      }
-      activeDishes.delete(row.id);
-      notifyProgress(row.id);
+const fillImageSlots=workerPool(concurrency(environment.MENU_IMAGE_CONCURRENCY,4,8),()=>{
+  for (const [id,job] of imageJobs) {
+    if (job.failed || !job.remaining.length) continue;
+    if (!job.started) {
+      db.prepare("UPDATE menus SET state='running' WHERE id=?").run(id);
+      job.started=true;
     }
+    // Move this menu behind the others before allocating the next slot.
+    imageJobs.delete(id);
+    imageJobs.set(id,job);
+    const position=job.remaining.shift();
+    job.active.add(position);
+    notifyProgress(id);
+    return ()=>illustrateDish(id,job,position);
+  }
+});
+
+function finishImages(id,failed) {
+  if (failed) db.prepare("UPDATE menus SET state='error' WHERE id=?").run(id);
+  else db.prepare("UPDATE menus SET state='complete',created=? WHERE id=?").run(new Date().toISOString(),id);
+  imageJobs.delete(id);
+}
+
+async function illustrateDish(id,job,position) {
+  try {
+    const key=dishKey(id,position);
+    // A restart can land between a successful R2 write and its SQLite checkpoint.
+    if (!await objectExists(key)) {
+      const dish=job.dishes[position];
+      const {model,quality}=job.config;
+      const bytes=await history.measure(id,'image',dish.name,model,quality,
+        received=>generateDish(dish,job.config,received));
+      await putObject(key,bytes,'image/webp');
+    }
+    db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(id,position,key);
+  } catch {
+    // Stop taking new dishes for this menu. Let its in-flight images checkpoint before retry.
+    job.failed=true;
   } finally {
-    working = false;
+    job.active.delete(position);
+    if (!job.active.size && (job.failed || !job.remaining.length)) finishImages(id,job.failed);
+    notifyProgress(id);
   }
 }
+
 function queue() {
-  if (ready) void runQueue().catch(error=>console.error('Queue failed',error.name));
+  if (!ready) return;
+  for (const row of db.prepare("SELECT id,payload FROM menus WHERE state='queued' ORDER BY created,rowid").all()) {
+    if (imageJobs.has(row.id)) continue;
+    const {dishes,imageSettings}=JSON.parse(row.payload);
+    const saved=new Set(savedPositions(row.id));
+    const remaining=dishes.map((_,i)=>i).filter(i=>!saved.has(i));
+    if (remaining.length) {
+      const config=imageSettings || {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium'};
+      imageJobs.set(row.id,{dishes,config,remaining,active:new Set(),started:false,failed:false});
+    } else {
+      finishImages(row.id,false);
+      notifyProgress(row.id);
+    }
+  }
+  fillImageSlots();
 }
+queueReading();
 queue();
 setInterval(()=>{
   const now = Date.now();
