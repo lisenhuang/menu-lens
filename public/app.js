@@ -1,5 +1,5 @@
 import {icons} from './icons.js?v=3';
-import {dateLabel, dishMedia, escape, icon, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=2';
+import {dishMedia, escape, icon, listing, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=3';
 
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#modal');
@@ -167,23 +167,6 @@ viewer.addEventListener('close',()=>{
   imageOpener?.focus({preventScroll:true});
 });
 
-function listing(menu) {
-  return `<article class="dish-card menu-card"><a class="menu-card-link" href="/menu/${escape(menu.id)}" aria-label="View ${escape(menu.restaurant.name)} menu">
-    <div class="dish-image"><img src="${escape(menu.cover)}" alt="" width="780" height="500" loading="lazy"></div>
-    <div class="dish-body"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
-    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p></div></div></a></article>`;
-}
-async function home() {
-  try {
-    const menus = (await api('/menus')).sort((a,b)=>b.published.localeCompare(a.published));
-    if (menus.length) {
-      $('#recent-grid').innerHTML = menus.slice(0,3).map(listing).join('');
-      $('#recent-menus').hidden = false;
-    }
-  } catch {
-    // The homepage remains usable if the collection is temporarily unavailable.
-  }
-}
 async function explore() {
   document.title = 'Explore menus · Menu Lens';
   page('Explore menus','THE PUBLIC COLLECTION','Browse visual menus shared by diners. Look for the date each menu was photographed.',
@@ -878,8 +861,7 @@ try {
 } catch {}
 
 const route = location.pathname.replace(/\/$/,'') || '/';
-if (route==='/') void home();
-else if (route==='/admin') void import('./admin.js?v=5').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
+if (route==='/admin') void import('./admin.js?v=5').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();

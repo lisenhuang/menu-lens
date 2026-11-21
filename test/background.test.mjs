@@ -435,6 +435,20 @@ test('private uploads and approved illustrations finish with no client connected
     assert.equal(imageCalls,beforeImages+1);
     assert.equal(readCalls,startReads+2);
   });
+  await t.test('homepage includes every published menu and links cover images to its menu',async()=>{
+    const catalog=new DatabaseSync(join(dir,'menu.sqlite'));
+    const id='eeeeeeeeeeeeeeeeeeee';
+    catalog.prepare('INSERT INTO menus SELECT ?,?,restaurant_key,date,created,payload,state,attempts FROM menus WHERE id=?').run(id,'homepage-test',first.id);
+    catalog.prepare('INSERT INTO dish_objects SELECT ?,position,object_key FROM dish_objects WHERE menu_id=?').run(id,first.id);
+    catalog.close();
+    const menus=await (await request('/api/menus')).json();
+    assert.ok(menus.length>3);
+    const html=await (await request('/')).text();
+    assert.match(html,/>Published menus<\/h2>/);
+    assert.equal((html.match(/class="menu-card-link"/g)||[]).length,menus.length);
+    for (const menu of menus) assert.ok(html.includes('class="menu-card-link" href="/menu/'+menu.id+'"'));
+    assert.ok(!html.includes('data-view-image'));
+  });
   assert.equal((await request('/fonts/dm-sans-OFL.txt')).status,200);
   assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);
 });

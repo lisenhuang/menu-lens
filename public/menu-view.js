@@ -24,6 +24,12 @@ export function dishMedia(dish) {
   return `<a class="dish-image" href="${escape(dish.image)}" data-view-image aria-haspopup="dialog">
     <img src="${escape(dish.image)}" alt="AI illustration of ${escape(dish.name)}" width="780" height="500" loading="lazy"></a>`;
 }
+export function listing(menu) {
+  return `<article class="dish-card menu-card"><a class="menu-card-link" href="/menu/${escape(menu.id)}" aria-label="View ${escape(menu.restaurant.name)} menu">
+    <div class="dish-image"><img src="${escape(menu.cover)}" alt="" width="780" height="500" loading="lazy"></div>
+    <div class="dish-body"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
+    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p></div></div></a></article>`;
+}
 function dishCard(dish) {
   return `<article class="dish-card" id="${escape(dish.id)}" data-position="${dish.position}">${dishMedia(dish)}
     <div class="dish-body"><h3>${escape(dish.name)}</h3>${dish.price ? `<span class="price">${escape(dish.price)}</span>` : ''}

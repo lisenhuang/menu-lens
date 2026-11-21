@@ -1,4 +1,4 @@
-import {renderMenu} from './public/menu-view.js';
+import {listing, renderMenu} from './public/menu-view.js';
 import {setTimeout as delay} from 'node:timers/promises';
 import {getObject,putObject,deleteObject,dishKey,objectSchema,objectExists} from './storage.mjs';
 import {createServer} from 'node:http';
@@ -322,6 +322,12 @@ function card(row,first=row.firstPhoto ?? 0) {
   const {restaurant,dishes}=JSON.parse(row.payload);
   return {id:row.id,restaurant,date:row.date,published:row.created,cover:`/media/${row.id}/${first}.webp`,
     state:row.state,count:dishes.length,completed:row.completed ?? dishes.length};
+}
+function publicCards() {
+  const rows=db.prepare(`SELECT menus.*,min(position) AS firstPhoto,count(position) AS completed
+      FROM menus JOIN dish_objects ON menu_id=menus.id GROUP BY menus.id
+      ORDER BY date DESC,created DESC,menus.id`).all();
+  return rows.map(row=>card(row));
 }
 function publicMenu(row) {
   if (!row) return null;
@@ -687,10 +693,7 @@ async function api(req,res,path) {
     generation:ready, places:Boolean(environment.GOOGLE_PLACES_API_KEY || nzPlaces.length),maxDishes,
   });
   if (path === '/api/menus' && get) {
-    const rows=db.prepare(`SELECT menus.*,min(position) AS firstPhoto,count(position) AS completed
-      FROM menus JOIN dish_objects ON menu_id=menus.id GROUP BY menus.id
-      ORDER BY date DESC,created DESC LIMIT 200`).all();
-    return write(res,200,rows.map(row=>card(row)));
+    return write(res,200,publicCards());
   }
   const menuId = path.match(/^\/api\/menus\/([a-f0-9]{20})$/)?.[1];
   if (menuId && get) {
@@ -797,6 +800,11 @@ const server = createServer(async (req,res)=>{
     const id = parts.length===3 && parts[1]==='menu' ? parts[2] : '';
     if (['/','/create','/explore','/privacy'].includes(path) || publicId.test(id)) {
       let html = document;
+      if (path==='/') {
+        const menus=publicCards().sort((a,b)=>b.published.localeCompare(a.published));
+        const cards=menus.length ? menus.map(listing).join('') : '<p class="muted">No menus published yet.</p>';
+        html=document.replace('<!--published-menu-cards-->',()=>cards);
+      }
       if (id) {
         const row=db.prepare('SELECT * FROM menus WHERE id=?').get(id);
         const publicView=publicMenu(row);
