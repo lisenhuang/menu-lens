@@ -136,6 +136,11 @@ textarea.control{resize:vertical;min-height:70px}
 .dropzone .inline-actions{justify-content:center;margin-top:.35rem}
 .files{display:grid;gap:.45rem;margin-top:.75rem}
 .file-row{display:flex;align-items:center;gap:.7rem;padding:.45rem .62rem;background:var(--soft);border-radius:9px;font-size:.88rem}
+.photo-progress{margin:.8rem 0;padding:.7rem .85rem;background:var(--wash);border-radius:9px;font-size:.9rem;font-weight:600}
+.photo-progress .progress{display:block;height:.45rem;margin:.4rem 0 0}
+.pending-file{color:var(--muted)}
+.pending-file>[data-icon]{width:46px}
+.pending-file small{margin-left:auto;white-space:nowrap}
 .file-row img{width:46px;height:40px;object-fit:cover;border-radius:6px}
 .file-row .truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .file-row button{margin-left:auto}

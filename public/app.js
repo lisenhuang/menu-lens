@@ -82,6 +82,38 @@ async function api(path,body) {
   return json;
 }
 
+function uploadPhotos(id,pages,onProgress) {
+  return new Promise((resolve,reject)=>{
+    const request=new XMLHttpRequest();
+    request.upload.onprogress=event=>{
+      if (event.lengthComputable && event.total>0) onProgress(event.loaded/event.total);
+    };
+    request.upload.onload=()=>onProgress(1);
+    request.onload=()=>{
+      if (request.status===202 && request.response?.id===id) return resolve();
+      reject(new Error(request.response?.error || 'The upload could not be confirmed. Check Your submissions or try again.'));
+    };
+    request.onerror=request.ontimeout=()=>reject(new Error('The upload connection was interrupted. Check Your submissions or try again.'));
+    request.open('POST','/api/jobs/'+id+'/upload');
+    request.responseType='json';
+    request.timeout=5*60_000;
+    request.setRequestHeader('Content-Type','application/json');
+    request.send(JSON.stringify({pages}));
+  });
+}
+
+function progressFeedback(id) {
+  return `<div class="photo-progress" id="${id}" hidden><span role="status"></span>
+    <progress class="progress" aria-label="Photo progress"></progress></div>`;
+}
+function showPhotoProgress(id,message,fraction=null) {
+  const box=document.getElementById(id);
+  box.hidden=!message;
+  const label=box.querySelector('span'),meter=box.querySelector('progress');
+  if (label.textContent!==message) label.textContent=message;
+  if (fraction===null) meter.removeAttribute('value');else meter.value=fraction;
+}
+
 let toastTimer;
 function toast(message) {
   const element = $('#toast');
@@ -207,7 +239,7 @@ function privacy() {
     `<div class="panel privacy">
       <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, reviewed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Review and remove private details before submitting.</p>
-      <p>OpenAI reads your menu photos. A draft is private for up to 24 hours. When you publish, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
+      <p>OpenAI reads your menu photos. Draft photos stay private for up to 24 hours, including when reading fails. You can retry from the same browser during that time. When you publish, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
       <p>Your browser remembers links to recent submissions on this device. Before you approve a menu, only the browser that uploaded it can reopen the draft.</p>
       <p>Menu Lens stores the requesting IP address alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
@@ -217,7 +249,7 @@ function privacy() {
 }
 
 const state = {
-  step:1, files:[], name:'',address:'',date:localDate(),place:null, position:null,
+  step:1, files:[], preparing:null, name:'',address:'',date:localDate(),place:null, position:null,
   confirmed:false, lookup:[], transcript:'', notes:'',dishes:[],warnings:[],read:false,
   config:null,verified:false,submissionId:null,
 };
@@ -266,7 +298,7 @@ function uploadStep() {
     <button type="button" class="btn quiet" id="camera">${icon('camera')} Take photo</button></div>
     <input id="files" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple hidden>
     <input id="capture" type="file" accept="image/*" capture="environment" hidden></div>
-    <p class="error" id="upload-error" role="alert" hidden></p><div class="files" id="selected-files"></div>
+    ${progressFeedback('prepare-progress')}<p class="error" id="upload-error" role="alert" hidden></p><div class="files" id="selected-files"></div>
     <div id="availability"></div><div class="form-actions"><a href="/explore" class="btn text back">Explore menus</a>
     ${primary('Continue',null,'id="next" disabled')}</div>`);
   const drop=$('#drop-zone');
@@ -286,27 +318,41 @@ function updateUpload() {
   if (!list) return;
   list.innerHTML=state.files.map((file,i)=>`<div class="file-row"><img src="${file.url}" alt=""><span class="truncate">${escape(file.name)}</span>
     <button type="button" class="icon-button" data-remove="${i}" aria-label="Remove ${escape(file.name)}">${icon('close')}</button></div>`).join('');
+  const batch=state.preparing;
+  if (batch) {
+    const slots=6-state.files.length;
+    const pending=batch.files.slice(batch.index,batch.index+slots);
+    list.insertAdjacentHTML('beforeend',pending.map((file,i)=>`<div class="file-row pending-file">
+      ${icon('camera')}<span class="truncate">${escape(file.name || 'Menu photo')}</span><small>${i===0?'Preparing…':'Waiting'}</small></div>`).join(''));
+    const total=batch.index+pending.length;
+    showPhotoProgress('prepare-progress',`Preparing photo ${batch.index+1} of ${total} on this device…`,batch.index ? batch.index/total : null);
+  } else {
+    showPhotoProgress('prepare-progress','');
+  }
+  $('#choose').disabled=$('#camera').disabled=Boolean(batch);
   list.querySelectorAll('button').forEach(button=>button.onclick=()=>{
     URL.revokeObjectURL(state.files[Number(button.dataset.remove)].url);
     state.files.splice(Number(button.dataset.remove),1);
     state.read=false;
     updateUpload();
   });
-  $('#next').disabled=!state.files.length || Boolean(state.loadingFiles);
+  $('#next').disabled=!state.files.length || Boolean(batch);
   $('#availability').innerHTML=state.config?.generation===false ?
     notice('Menu submissions are temporarily unavailable. Please try again later.') : '';
 }
 async function addFiles(files) {
-  if (state.loadingFiles) return;
-  state.loadingFiles=true;
-  updateUpload();
+  if (state.preparing) return;
   const input=Array.from(files);
+  if (!input.length) return;
   const messages=[];
-  for (const file of input) {
+  errorAt($('#upload-error'),'');
+  for (const [index,file] of input.entries()) {
     if (state.files.length>=6) {
       messages.push('A submission can include up to six pages.');
       break;
     }
+    state.preparing={files:input,index};
+    updateUpload();
     try {
       if (file.size>22_000_000) throw new Error('too large');
       const blob=await preparePhoto(file);
@@ -316,7 +362,7 @@ async function addFiles(files) {
       messages.push(`${file.name || 'The photo'} could not be opened. Try a JPG, PNG or WebP file under 22 MB.`);
     }
   }
-  state.loadingFiles=false;
+  state.preparing=null;
   updateUpload();
   errorAt($('#upload-error'),messages.join(' '));
 }
@@ -508,6 +554,18 @@ function renderPlaces(searched=false) {
   for (const [name,url] of attributions) {
     if (name && /^https?:\/\//.test(url)) list.insertAdjacentHTML('beforeend',`<a class="maps-attribution" href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(name)}</a>`);
   }
+  const batch=state.preparing;
+  if (batch) {
+    const slots=6-state.files.length;
+    const pending=batch.files.slice(batch.index,batch.index+slots);
+    list.insertAdjacentHTML('beforeend',pending.map((file,i)=>`<div class="file-row pending-file">
+      ${icon('camera')}<span class="truncate">${escape(file.name || 'Menu photo')}</span><small>${i===0?'Preparing…':'Waiting'}</small></div>`).join(''));
+    const total=batch.index+pending.length;
+    showPhotoProgress('prepare-progress',`Preparing photo ${batch.index+1} of ${total} on this device…`,batch.index ? batch.index/total : null);
+  } else {
+    showPhotoProgress('prepare-progress','');
+  }
+  $('#choose').disabled=$('#camera').disabled=Boolean(batch);
   list.querySelectorAll('button').forEach(button=>button.onclick=()=>{
     const place=state.lookup[Number(button.dataset.place)];
     state.name=place.name;
@@ -553,7 +611,7 @@ function consentModal() {
     <p>OpenAI checks the photos first. If every dish already has a photo, generation stops. Otherwise, the photos you submit will be kept and shared in the Original menu section when you publish. Your GPS stays private. Menu Lens records the requesting IP address in its private generation history.</p>
     <label class="checkbox"><input type="checkbox" id="consent">I agree to publish the restaurant details and my original menu photos.</label>
     ${ready ? '<div id="challenge" aria-label="Human verification"></div>' : notice('New menu generation is temporarily unavailable.')}
-    <p class="error" id="verify-error" role="alert" hidden></p>
+    ${progressFeedback('transfer-progress')}<p class="error" id="verify-error" role="alert" hidden></p>
     <div class="form-actions">${primary('Verify &amp; read menu','shield','id="read-menu" disabled')}</div>`);
   if (!ready) return;
   const consent=$('#consent',dialog);
@@ -579,11 +637,12 @@ function consentModal() {
     sync();
     errorAt(error,'');
     $('.modal-close',dialog).disabled=true;
-    read.textContent='Uploading photos…';
-    dialog.setAttribute('aria-busy','true');
+    read.textContent='Submitting…';
+    showPhotoProgress('transfer-progress','Verifying submission…');
     try {
       const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,
         locationConfirmed:state.confirmed || !locationCheck().confirm,consent:true,shareOriginals:true,token});
+      showPhotoProgress('transfer-progress','Preparing upload…');
       const pages=await Promise.all(state.files.map(async file=>{
         const blob=file.blob || await fetch(file.url).then(response=>{
           if (!response.ok) throw new Error('Your source photo has expired. Upload the menu again.');
@@ -591,10 +650,15 @@ function consentModal() {
         });
         return dataUrl(blob);
       }));
-      const {id}=await api('/jobs/'+verified.id+'/upload',{pages});
-      remember(id,state.name,true);
-      location.assign('/menu/'+id);
+      showPhotoProgress('transfer-progress','Uploading photos…');
+      await uploadPhotos(verified.id,pages,fraction=>{
+        if (fraction>=1) showPhotoProgress('transfer-progress','Saving uploaded photos…');
+        else showPhotoProgress('transfer-progress',`Uploading photos · ${Math.floor(fraction*100)}%`,fraction);
+      });
+      remember(verified.id,state.name,true);
+      location.assign('/menu/'+verified.id);
     } catch(err) {
+      showPhotoProgress('transfer-progress','');
       errorAt(error,err.message);
       if (widget!==undefined) window.turnstile.reset(widget);
     } finally {
@@ -602,7 +666,6 @@ function consentModal() {
       reading=false;
       read.innerHTML=icon('shield')+'Verify &amp; read menu';
       if (dialog.open) $('.modal-close',dialog).disabled=false;
-      dialog.removeAttribute('aria-busy');
       sync();
     }
   };
@@ -876,12 +939,6 @@ async function openSubmission(id) {
         <div class="inline-actions"><button class="btn quiet" id="save-link">${icon('link')} Copy return link</button>
         ${primary('Retry remaining images','sparkles','id="retry" hidden')}<a class="btn primary" href="/create" id="new-upload" hidden>Upload another menu</a></div></section>`,back);
       $('#save-link').onclick=()=>share('Return link');
-      $('#retry').onclick=async event=>{
-        const button=event.currentTarget;
-        button.disabled=true;
-        try {await api(path+'/retry',{});remember(id,job.name,true);void openSubmission(id);}
-        catch(error) {errorAt($('#job-error'),error.message);button.disabled=false;}
-      };
     }
     const step=publishing?3:images?2:0;
     document.querySelectorAll('.job-stages li').forEach((el,i)=>{
@@ -896,8 +953,24 @@ async function openSubmission(id) {
     meter.hidden=!active && !images;
     if (images) {meter.max=job.total;meter.value=job.completed;} else meter.removeAttribute('value');
     $('#job-return').textContent=active && job.state!=='uploading' ? (images?'You can close this page. Your finished menu will appear at this link.':'You can close this page. Return here in this browser to review your menu.') : '';
-    $('#retry').hidden=!job.canRetry;
-    $('#new-upload').textContent=job.state==='read_error'?'Upload photos again':'Upload another menu';
+    if (job.state==='read_error' && job.pageCount) {
+      const until=new Date(job.expires).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+      $('#job-return').textContent=`Your photos are private until ${until}. `+(job.canRetryRead?'You can retry with these photos.':'This draft has used all three reading attempts.');
+    }
+    const retry=$('#retry');
+    retry.hidden=!job.canRetry && !job.canRetryRead;
+    retry.textContent=job.canRetryRead?'Retry reading menu':'Retry remaining images';
+    retry.onclick=async()=>{
+      retry.disabled=true;
+      try {
+        if (job.canRetryRead) await api(path+'/retry-read',{attempt:job.readAttempt});
+        else await api(path+'/retry',{});
+        remember(id,job.name,true);
+        void openSubmission(id);
+      } catch(error) {errorAt($('#job-error'),error.message);retry.disabled=false;}
+    };
+    $('#new-upload').textContent=job.pageCount && job.state==='read_error'?'Choose different photos':job.state==='read_error'?'Upload photos again':'Upload another menu';
+    $('#new-upload').className=job.canRetryRead?'btn quiet':'btn primary';
     $('#new-upload').hidden=!['already_illustrated','read_error'].includes(job.state);
     errorAt($('#job-error'),'');
     document.title=title+' · '+job.name+' · Menu Lens';

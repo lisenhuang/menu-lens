@@ -37,27 +37,30 @@ export async function verifyPerson(token, ip, action='menu_submit') {
 async function openAI(path, body, timeout, received) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new RequestError(503, 'AI generation is currently unavailable.');
-  let response;
+  const signal=AbortSignal.timeout(timeout);
   try {
-    response = await fetch(openaiOrigin + path, {
-      method:'POST',
-      headers:{'Authorization':`Bearer ${key}`, 'Content-Type':'application/json'},
-      body:JSON.stringify(body), signal:AbortSignal.timeout(timeout),
+    const response=await fetch(openaiOrigin+path,{
+      method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},
+      body:JSON.stringify(body),signal,
     });
-  } catch {
-    throw new RequestError(502, 'The AI service did not respond. Please try again.');
-  }
-  if (!response.ok) {
-    const details = await response.json().catch(() => ({}));
+    if (response.ok) return await response.json();
+    const details=await response.json().catch(()=>({}));
     if (details.usage) received(details.usage,false);
-    const code = details.error?.code;
-    console.warn('OpenAI request failed', path, response.status, typeof code === 'string' && /^[\w-]+$/.test(code) ? code : '');
-    if (response.status === 400 && details.error?.type === 'image_generation_user_error') {
-      throw new RequestError(422, 'One of the dish images could not be generated from the reviewed menu.');
+    const code=details.error?.code;
+    console.warn('OpenAI request failed',path,response.status,typeof code==='string' && /^[\w-]+$/.test(code)?code:'');
+    if (response.status===400 && details.error?.type==='image_generation_user_error') {
+      throw new RequestError(422,'One of the dish images could not be generated from the reviewed menu.');
     }
-    throw new RequestError(502, 'The AI service could not complete this request. Please try again later.');
+    throw new RequestError(502,'The AI service could not complete this request. Please try again later.');
+  } catch(error) {
+    if (error instanceof RequestError) throw error;
+    if (signal.aborted) {
+      console.warn('OpenAI request timed out',path,timeout);
+      throw new RequestError(504,'The AI service took too long to respond.');
+    }
+    console.warn('OpenAI response unavailable',path,error.name);
+    throw new RequestError(502,'The AI service did not return a usable response. Please try again.');
   }
-  return response.json();
 }
 
 const string = {type:'string'};
@@ -82,7 +85,7 @@ export async function readMenu(pages,effort,received) {
     text:{format:{type:'json_schema',name:'menu_transcription',strict:true,schema}},
     max_output_tokens:24000,
     reasoning:{effort},
-  }, 105000, received);
+  }, 5*60_000, received);
   received(data.usage);
   const output = data.output?.flatMap(item=>item.content || []).find(item=>item.type === 'output_text')?.text;
   if (!output || data.status !== 'completed') throw new RequestError(422, 'The menu could not be read completely. Try sharper photos or fewer pages.');

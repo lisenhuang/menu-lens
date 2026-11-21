@@ -6,7 +6,7 @@ Turn a photo of a restaurant menu into a public, dated menu with an AI illustrat
 
 **Upload photos → confirm the restaurant → review the menu → publish**
 
-You can close the tab after uploading. Return in the same browser within 24 hours to review the draft. Menus with a photo for every dish stop after reading. Approved menus appear at the same link with the original photos in a collapsed section. [Your submissions](https://menu.9l.nz/submissions)
+You can close the tab after uploading. Return in the same browser within 24 hours to review the draft or retry a failed read using the saved photos. Each read has up to five minutes. Menus with a photo for every dish stop after reading. Approved menus appear at the same link with the original photos in a collapsed section. [Your submissions](https://menu.9l.nz/submissions)
 
 | Choose a theme | Browse a published menu |
 | :---: | :---: |

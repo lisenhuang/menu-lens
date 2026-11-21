@@ -45,7 +45,7 @@ export function generationHistory(db) {
   `);
   const newRun=db.prepare('INSERT OR IGNORE INTO generation_runs (id,restaurant,recorded,upload_ip) VALUES (?,?,?,?)');
   const startCall=db.prepare(`INSERT INTO generation_calls
-    (run_id,started,kind,label,model,level,ip,state) SELECT id,?,?,?,?,?,CASE WHEN ?='read' THEN upload_ip ELSE image_ip END,'running'
+    (run_id,started,kind,label,model,level,ip,state) SELECT id,?,?,?,?,?,CASE WHEN ?='read' THEN COALESCE(?,upload_ip) ELSE image_ip END,'running'
     FROM generation_runs WHERE id=? RETURNING seq`);
   const setPrice=db.prepare('UPDATE generation_calls SET usd=?,basis=?,usage=? WHERE seq=?');
   function register(id,name,ip) {
@@ -54,8 +54,8 @@ export function generationHistory(db) {
   function imageRequester(id,ip) {
     db.prepare('UPDATE generation_runs SET image_ip=? WHERE id=?').run(validIp(ip),id);
   }
-  async function measure(id,kind,label,model,level,operation) {
-    const {seq}=startCall.get(new Date().toISOString(),kind,label,model,level,kind,id);
+  async function measure(id,kind,label,model,level,operation,requestIp=null) {
+    const {seq}=startCall.get(new Date().toISOString(),kind,label,model,level,kind,validIp(requestIp),id);
     let status='failed';
     function received(usage,hasOutput=false) {
       const {usd,basis}=price(kind,model,level,usage,hasOutput);

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomBytes,randomInt,scryptSync} from 'node:crypto';
 import {fork} from 'node:child_process';
+import {DatabaseSync} from 'node:sqlite';
 import {once} from 'node:events';
 import {createServer} from 'node:http';
 import {Readable} from 'node:stream';
@@ -32,6 +33,7 @@ test('private uploads and approved illustrations finish with no client connected
   let holdRead=true;
   let imageCalls=0;
   let readCalls=0;
+  let failReading=false;
   const provider=createServer(async (req,res)=>{
     const chunks=[];
     for await (const chunk of req) chunks.push(chunk);
@@ -54,6 +56,7 @@ test('private uploads and approved illustrations finish with no client connected
       readingRequest=JSON.parse(body);
       readCalls++;
       while (holdRead && !res.destroyed) await delay(10);
+      if (failReading) {res.statusCode=503;return res.end('{}');}
       response={status:'completed',usage:{input_tokens:400,input_tokens_details:{cached_tokens:80},output_tokens:95},output:[{content:[{type:'output_text',text:JSON.stringify(visionResult)}]}]};
     } else if (req.url==='/v1/images/generations') {
       imageRequest=JSON.parse(body);
@@ -273,6 +276,56 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(imageRequest.quality,'high');
   assert.equal(imageRequest.model,'gpt-image-2.6-sunburst');
   assert.equal(readingRequest.reasoning.effort,'high');
+
+  // A failed read keeps its R2 keys private across restarts. Duplicate retries
+  // reuse the same attempt, even when the new read has already failed.
+  const kept=await verify('Retry kitchen');
+  const keptPath='/api/jobs/'+kept.id;
+  const savedPages=[photo,'data:image/jpeg;base64,/9j/3Q=='];
+  const status=async()=> (await request(keptPath,kept.cookie)).json();
+  failReading=true;
+  assert.equal((await request(keptPath+'/upload',kept.cookie,{pages:savedPages})).status,202);
+  await until(async()=> (await status()).state==='read_error');
+  assert.equal((await status()).pageCount,2);
+  assert.equal((await status()).canRetryRead,true);
+  assert.equal((await status()).readAttempt,1);
+  assert.equal((await request(keptPath,first.cookie)).status,404);
+  assert.equal((await request(keptPath+'/retry-read','',{attempt:1})).status,403);
+  assert.equal((await request(keptPath+'/retry-read',first.cookie,{attempt:1})).status,403);
+  assert.equal((await request('/originals/'+kept.id+'/0.jpg')).status,404);
+  assert.equal((await request('/api/menus/'+kept.id)).status,404);
+  assert.equal((await request(keptPath+'/publish',kept.cookie,{...menu,reviewed:true})).status,403);
+  await stop();
+  await start();
+  const beforeRetry=readCalls;
+  const retryRead=attempt=>request(keptPath+'/retry-read',kept.cookie,{attempt},'2001:db8::9');
+  const retries=await Promise.all([retryRead(1),retryRead(1)]);
+  assert.ok(retries.every(r=>r.status===202));
+  await until(async()=> (await status()).state==='read_error');
+  assert.equal((await retryRead(1)).status,202);
+  assert.equal(readCalls,beforeRetry+1);
+  assert.equal((await status()).readAttempt,2);
+  failReading=false;
+  assert.equal((await retryRead(2)).status,202);
+  await until(async()=> (await status()).state==='review');
+  assert.deepEqual(readingRequest.input[0].content.filter(c=>c.type==='input_image').map(c=>c.image_url),savedPages);
+  assert.equal((await request('/originals/'+kept.id+'/1.jpg')).status,404);
+  assert.equal((await request(keptPath+'/photos/1',first.cookie)).status,404);
+  assert.equal((await request(keptPath+'/photos/1',kept.cookie)).status,200);
+  const ledger=new DatabaseSync(join(dir,'menu.sqlite'));
+  const readIps=ledger.prepare("SELECT ip FROM generation_calls WHERE run_id=? AND kind='read' ORDER BY seq").all(kept.id);
+  assert.deepEqual(readIps.map(c=>c.ip),['192.0.2.45','2001:db8::9','2001:db8::9']);
+  ledger.prepare("UPDATE drafts SET state='read_error' WHERE id=?").run(kept.id);
+  assert.equal((await status()).canRetryRead,false);
+  assert.equal((await retryRead(3)).status,429);
+  ledger.prepare("UPDATE sessions SET reads=1 WHERE id=(SELECT owner FROM drafts WHERE id=?)").run(kept.id);
+  ledger.prepare("UPDATE drafts SET pages='[]' WHERE id=?").run(kept.id);
+  assert.equal((await status()).canRetryRead,false);
+  assert.equal((await retryRead(1)).status,409);
+  ledger.prepare("UPDATE sessions SET expires=0 WHERE id=(SELECT owner FROM drafts WHERE id=?)").run(kept.id);
+  assert.equal((await request(keptPath,kept.cookie)).status,404);
+  assert.equal((await retryRead(1)).status,403);
+  ledger.close();
   assert.equal((await request('/fonts/dm-sans-OFL.txt')).status,200);
   assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);
 });

@@ -59,6 +59,10 @@ if (!db.prepare('PRAGMA table_info(sessions)').all().some(column=>column.name===
   db.exec('ALTER TABLE sessions ADD COLUMN read_success INTEGER NOT NULL DEFAULT 0');
 }
 
+if (!db.prepare('PRAGMA table_info(drafts)').all().some(column=>column.name==='read_ip')) {
+  db.exec('ALTER TABLE drafts ADD COLUMN read_ip TEXT');
+}
+
 const mime = {'html':'text/html; charset=utf-8','css':'text/css; charset=utf-8','js':'application/javascript; charset=utf-8','webp':'image/webp','svg':'image/svg+xml','woff2':'font/woff2','txt':'text/plain; charset=utf-8'};
 const statusText = 'Menu submissions are temporarily unavailable. Please try again later.';
 const publicId = /^[a-f0-9]{20}$/;
@@ -70,13 +74,13 @@ function settings() {
 }
 
 const history = generationHistory(db);
-function readForRun(id,pages) {
+function readForRun(id,pages,requestIp) {
   const model=environment.OPENAI_VISION_MODEL || 'gpt-5-mini';
   const {reasoning}=settings();
   return history.measure(id,'read','Menu transcription',model,reasoning,received=>{
     notifyProgress(id);
     return readMenu(pages,reasoning,received);
-  });
+  },requestIp);
 }
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
 const placesData = environment.R2_MAP_KEY ? await getObject(environment.R2_MAP_KEY) : placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
@@ -161,7 +165,7 @@ function jobOwner(req) {
   return token ? sha(token) : session(req,false)?.id;
 }
 function privateDraft(id, owner) {
-  const draft = owner && db.prepare(`SELECT drafts.state, sessions.details, drafts.error, json_array_length(drafts.pages) AS pageCount
+  const draft = owner && db.prepare(`SELECT drafts.state, sessions.details, sessions.reads, sessions.expires, drafts.error, json_array_length(drafts.pages) AS pageCount
     FROM drafts JOIN sessions ON sessions.id=drafts.owner
     WHERE drafts.id=? AND drafts.owner=? AND sessions.expires>?`).get(id,owner,Date.now());
   if (!draft) throw new RequestError(404,'This submission is unavailable. Open it in the browser you used to upload.');
@@ -185,7 +189,8 @@ function submissionStatus(id,owner) {
   const draft=privateDraft(id,owner);
   const {restaurant,date}=JSON.parse(draft.details);
   const transcribing=draft.state==='reading' && Boolean(db.prepare("SELECT 1 FROM generation_calls WHERE run_id=? AND kind='read' AND state='running'").get(id));
-  return {id,name:restaurant.name,restaurant,date,state:draft.state,error:draft.error,pageCount:draft.pageCount,transcribing};
+  return {id,name:restaurant.name,restaurant,date,state:draft.state,error:draft.error,pageCount:draft.pageCount,transcribing,
+    readAttempt:draft.reads,expires:draft.expires,canRetryRead:draft.state==='read_error' && draft.pageCount>0 && draft.reads<maxReadAttempts};
 }
 function notifyProgress(id) {
   for (const send of watchers.get(id) || []) send();
@@ -288,41 +293,43 @@ function publicMenu(row) {
 }
 
 const pendingLimit = 3;
+const maxReadAttempts=3;
 let readingDrafts = false;
 async function readDrafts() {
   if (readingDrafts || !ready) return;
   readingDrafts = true;
   try {
     let draft;
-    while ((draft=db.prepare(`SELECT drafts.id, drafts.pages FROM drafts JOIN sessions ON sessions.id=drafts.owner
+    while ((draft=db.prepare(`SELECT drafts.id, drafts.pages, drafts.read_ip FROM drafts JOIN sessions ON sessions.id=drafts.owner
       WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
       db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
       notifyProgress(draft.id);
       try {
         const pages=await Promise.all(JSON.parse(draft.pages).map(async key=>
           'data:image/jpeg;base64,'+(await getObject(key)).toString('base64')));
-        const output=await readForRun(draft.id,pages);
+        const output=await readForRun(draft.id,pages,draft.read_ip);
         if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
         if (output.dishes.length && output.dishes.every(dish=>dish.hasDishPhoto===true)) {
-          finishRead(draft,'already_illustrated','Every dish on this menu already has a photo. No dish illustrations were generated.');
+          discardIllustratedDraft(draft,'Every dish on this menu already has a photo. No dish illustrations were generated.');
           continue;
         }
         db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
         notifyProgress(draft.id);
       } catch (error) {
         const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
-        finishRead(draft,'read_error',message);
+        db.prepare("UPDATE drafts SET state='read_error',error=? WHERE id=?").run(message,draft.id);
+        notifyProgress(draft.id);
       }
     }
   } finally {
     readingDrafts = false;
   }
 }
-function finishRead(draft,state,message) {
+function discardIllustratedDraft(draft,message) {
   db.exec('BEGIN');
   try {
     db.prepare('INSERT OR IGNORE INTO object_cleanup SELECT value FROM json_each(?)').run(draft.pages);
-    db.prepare("UPDATE drafts SET state=?,error=?,pages='[]' WHERE id=?").run(state,message,draft.id);
+    db.prepare("UPDATE drafts SET state='already_illustrated',error=?,pages='[]' WHERE id=?").run(message,draft.id);
     db.exec('COMMIT');
   } catch(error) {db.exec('ROLLBACK');throw error;}
   notifyProgress(draft.id);
@@ -404,10 +411,13 @@ function validatePages(body) {
     typeof page !== 'string' || page.length>3_000_000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]+={0,2}$/.test(page)
   ))) throw new RequestError(400,'Upload between one and six readable menu photos.');
 }
+// Reserve queue capacity and an attempt together with the draft state change.
 function reserveRead(owner) {
-  if (!db.prepare('UPDATE sessions SET reads=reads+1 WHERE id=? AND reads<3').run(owner).changes || !rate('reading:daily',45,86_400_000)) {
-    throw new RequestError(429,'The menu reading limit has been reached. Please try again later.');
-  }
+  const outstanding=db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('uploading','waiting','reading')").get().count;
+  if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
+  const reserved=db.prepare('UPDATE sessions SET reads=reads+1 WHERE id=? AND reads<? AND expires>?').run(owner,maxReadAttempts,Date.now());
+  if (!reserved.changes) throw new RequestError(429,'This draft has reached its reading limit or expired.');
+  if (!rate('reading:daily',45,86_400_000)) throw new RequestError(429,'Today’s reading capacity has been reached. Please try again later.');
 }
 function checkImageQueue() {
   const outstanding = db.prepare("SELECT count(*) AS count FROM menus WHERE state IN ('queued','running')").get().count;
@@ -463,12 +473,14 @@ async function submitPages(req,id,owner,body) {
   if (existing) return;
   if (!JSON.parse(owner.details).shareOriginals) throw new RequestError(403,'Start a new submission to confirm sharing the original photos.');
   validatePages(body);
-  const outstanding=db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('uploading','waiting','reading')").get().count;
-  if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
-  reserveRead(owner.id);
   const prefix='originals/'+randomBytes(16).toString('hex')+'/';
   const keys=body.pages.map((_,i)=>prefix+i+'.jpg');
-  db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'uploading',?)").run(id,owner.id,JSON.stringify(keys));
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    reserveRead(owner.id);
+    db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'uploading',?)").run(id,owner.id,JSON.stringify(keys));
+    db.exec('COMMIT');
+  } catch(error) {db.exec('ROLLBACK');throw error;}
   try {
     for (const [i,page] of body.pages.entries()) {
       await putObject(keys[i],Buffer.from(page.split(',')[1],'base64'),'image/jpeg');
@@ -482,6 +494,25 @@ async function submitPages(req,id,owner,body) {
     throw error;
   }
   queueReading();
+}
+
+async function retryReading(req,res,id,owner) {
+  const {attempt}=await json(req,1024);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const draft=privateDraft(id,owner);
+    if (!Number.isInteger(attempt) || attempt<1 || attempt>draft.reads) throw new RequestError(400,'Reopen the draft to retry reading.');
+    // A repeated request for an older attempt must never start another paid read.
+    if (attempt===draft.reads) {
+      if (draft.state!=='read_error' || !draft.pageCount) throw new RequestError(409,'This draft has no failed read with saved photos to retry.');
+      reserveRead(owner);
+      db.prepare("UPDATE drafts SET state='waiting',error=NULL,read_ip=? WHERE id=?").run(clientIp(req),id);
+    }
+    db.exec('COMMIT');
+  } catch(error) {db.exec('ROLLBACK');throw error;}
+  notifyProgress(id);
+  queueReading();
+  return write(res,202,{id});
 }
 
 async function jobApi(req,res,id,action) {
@@ -506,6 +537,7 @@ async function jobApi(req,res,id,action) {
     if (row && ['publish','upload'].includes(action)) return write(res,202,{id});
     const active = db.prepare('SELECT * FROM sessions WHERE id=? AND expires>?').get(owner,Date.now());
     if (!active) throw new RequestError(403,'Your upload has expired. Start a new submission.');
+    if (action==='retry-read') return retryReading(req,res,id,owner);
     if (action==='publish') return publish(req,res,id,active);
     if (action==='upload') {
       limit(req,'read',9,86_400);
@@ -576,7 +608,7 @@ async function api(req,res,path) {
     if (!row) throw new RequestError(404,'This menu could not be found.');
     return write(res,200,publicMenu(row));
   }
-  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|retry|photos\/[0-5]))?$/);
+  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|retry-read|retry|photos\/[0-5]))?$/);
   if (job) return jobApi(req,res,job[1],job[2]);
   if (path === '/api/job' && get) {
     const owner = session(req,false);
