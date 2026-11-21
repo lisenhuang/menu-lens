@@ -56,13 +56,16 @@ function localDate() {
   const local = new Date(now.getTime()-now.getTimezoneOffset()*60000);
   return local.toISOString().slice(0,10);
 }
-function mapsUrl(name,address='',id='') {
-  const params = new URLSearchParams({api:'1',query:[name,address].filter(Boolean).join(', ')});
+function pinText(pin) {
+  return Number.isFinite(pin?.lat) && Number.isFinite(pin?.lng) ? pin.lat+', '+pin.lng : '';
+}
+function mapsUrl(name,address='',id='',pin) {
+  const params = new URLSearchParams({api:'1',query:pinText(pin) || [name,address].filter(Boolean).join(', ')});
   if (id && !id.startsWith('osm-')) params.set('query_place_id',id);
   return 'https://www.google.com/maps/search/?'+params;
 }
-function mapsLink(name,address,id) {
-  return `<a class="text-link" href="${escape(mapsUrl(name,address,id))}" target="_blank" rel="noopener noreferrer">Google Maps ${icon('external')}</a>`;
+function mapsLink(name,address,id,pin) {
+  return `<a class="text-link" href="${escape(mapsUrl(name,address,id,pin))}" target="_blank" rel="noopener noreferrer">Google Maps ${icon('external')}</a>`;
 }
 const notice = (text,name='info')=>`<p class="notice">${icon(name)}<span>${escape(text)}</span></p>`;
 const pagesBack = (href,label)=>`<a class="breadcrumb" href="${href}">${icon('back')} ${label}</a>`;
@@ -213,7 +216,7 @@ async function showMenu(id) {
     ${menu.restaurant.placeId?.startsWith('osm-') ? '<a class="field-hint" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>' : ''}
     <p class="hero-note">${icon('calendar')} Photographed ${dateLabel(menu.date)}</p>
     <div class="inline-actions"><button type="button" class="btn primary" id="share">${icon('link')} Copy link</button>
-    ${mapsLink(menu.restaurant.name,menu.restaurant.address,menu.restaurant.placeId)}
+    ${mapsLink(menu.restaurant.name,menu.restaurant.address,menu.restaurant.placeId,menu.restaurant.pin)}
     </div></div><img src="${escape(menu.cover)}" alt="AI illustration of ${escape(menu.dishes[0].name)}" width="780" height="500"></section>
     ${notice('Dish images are AI illustrations. Confirm current prices, availability and allergens with the restaurant.','sparkles')}
     ${sections.length>1 ? `<nav aria-label="Menu sections" class="menu-jumps">${sections.map((section,i)=>`<a href="#section-${i}">${escape(section || 'Menu')}</a>`).join('')}</nav>` : ''}
@@ -250,7 +253,7 @@ function privacy() {
 
 const state = {
   step:1, files:[], preparing:null, name:'',address:'',date:localDate(),place:null, position:null,
-  confirmed:false, lookup:[], transcript:'', notes:'',dishes:[],warnings:[],read:false,
+  confirmed:false, manualPin:'', transcript:'', notes:'',dishes:[],warnings:[],read:false,
   config:null,verified:false,submissionId:null,
 };
 let flow;
@@ -269,7 +272,11 @@ function buildFlow() {
     state.config=config;
     if (state.step===1) updateUpload();
     if (state.step===2) updateLocation();
-  }).catch(()=>{state.config={generation:false,places:false};if(state.step===1) updateUpload();});
+  }).catch(()=>{
+    state.config={generation:false,places:false};
+    if (state.step===1) updateUpload();
+    if (state.step===2) updateLocation();
+  });
 
 }
 function renderStep() {
@@ -397,9 +404,9 @@ const dataUrl = blob=>new Promise((resolve,reject)=>{
 
 function locationStep() {
   flow.insertAdjacentHTML('beforeend',`
-    <h2>Find the restaurant</h2><p class="muted">Use the restaurant’s exact name and branch address.</p>
+    <h2>Find the restaurant</h2><p class="muted">Search by name, then choose a branch to fill in its location.</p>
     <form id="location-form" class="fields">
-      <label class="field">Restaurant name<input class="control" id="restaurant-name" required maxlength="180" value="${escape(state.name)}" placeholder="e.g. Ortega Fish Shack"></label>
+      <label class="field">Restaurant name<input class="control" id="restaurant-name" required maxlength="180" enterkeyhint="search" value="${escape(state.name)}" placeholder="e.g. Ortega Fish Shack"></label>
       <div class="inline-actions">
         <button type="button" class="btn quiet small" id="place-search">${icon('search')} Search restaurants</button>
         <button type="button" class="btn quiet small" id="gps">${icon('locate')} Use my location</button>
@@ -407,8 +414,8 @@ function locationStep() {
       </div>
       <div id="place-results" class="search-results" aria-live="polite"></div>
       <p id="location-status" class="field-hint" aria-live="polite"></p>
-      <label class="field">Restaurant address<input class="control" id="restaurant-address" required maxlength="400" value="${escape(state.address)}" placeholder="Street address, city"></label>
-      <details id="pin-details"><summary class="field-hint">Add a map pin for distance checking</summary>
+      <label class="field">Restaurant address or map location<input class="control" id="restaurant-address" required maxlength="400" value="${escape(state.address)}" placeholder="Street address, city"></label>
+      <details id="pin-details"><summary class="field-hint">Restaurant map pin</summary>
         <label class="field">Map coordinates <span class="field-hint">Copy latitude and longitude from the restaurant pin.</span>
           <input class="control" id="pin-coordinates" value="${escape(state.manualPin || '')}" placeholder="-41.294, 174.784" autocomplete="off">
         </label>
@@ -419,10 +426,26 @@ function locationStep() {
       <div class="form-actions"><button type="button" class="btn text back" id="back">${icon('back')} Photos</button>
         <button type="submit" class="btn primary">${icon('shield')} Review &amp; submit</button></div>
     </form>`);
+  let searchVersion=0;
+  const results=$('#place-results');
+  function clearResults() {
+    searchVersion++;
+    results.replaceChildren();
+    $('#place-search').disabled=false;
+  }
   function captureEdit(key,field) {
     $(field).addEventListener('input',event=>{
+      clearResults();
+      if (key==='manualPin' && state.manualPin && state.address===state.manualPin) {
+        state.address=$('#restaurant-address').value=event.target.value;
+      }
+      if (key==='name' && state.place) state.address=$('#restaurant-address').value='';
+      const addingStreetAddress=key==='address' && state.place?.fullAddress===false;
+      if (!addingStreetAddress) {
+        if (state.place && key!=='manualPin') state.manualPin=$('#pin-coordinates').value='';
+        state.place=null;
+      }
       state[key]=event.target.value;
-      state.place=null;
       state.confirmed=false;
       state.verified=false;
       updateLocation();
@@ -433,7 +456,33 @@ function locationStep() {
   captureEdit('manualPin','#pin-coordinates');
   $('#menu-date').addEventListener('input',event=>{state.date=event.target.value;state.verified=false;});
   $('#back').onclick=()=>go(1);
-  $('#place-search').onclick=findPlaces;
+  const searchButton=$('#place-search');
+  async function findPlaces() {
+    if (searchButton.disabled) return;
+    const query=state.name.trim();
+    if (query.length<2) {
+      results.textContent='Enter at least two characters to search.';
+      return;
+    }
+    const version=++searchVersion;
+    searchButton.disabled=true;
+    results.textContent='Searching restaurants…';
+    try {
+      const result=await api('/places',{query});
+      if (results.isConnected && version===searchVersion) renderPlaces(results,result);
+    } catch {
+      if (results.isConnected && version===searchVersion) results.textContent='Restaurant search is unavailable. Try again or enter the address below.';
+    } finally {
+      if (version===searchVersion) searchButton.disabled=false;
+    }
+  }
+  searchButton.onclick=findPlaces;
+  $('#restaurant-name').onkeydown=event=>{
+    if (event.key==='Enter' && !event.isComposing && !searchButton.hidden) {
+      event.preventDefault();
+      void findPlaces();
+    }
+  };
   $('#gps').onclick=requestLocation;
   $('#location-form').addEventListener('submit',event=>{
     event.preventDefault();
@@ -452,11 +501,10 @@ function locationStep() {
     consentModal();
   });
   updateLocation();
-  renderPlaces();
 }
 function restaurantPin() {
   const source=state.place;
-  if (Number.isFinite(source?.lat) && Number.isFinite(source?.lng)) return source;
+  if (Number.isFinite(source?.lat) && Number.isFinite(source?.lng)) return {lat:source.lat,lng:source.lng};
   const match=state.manualPin?.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
   if (!match || Math.abs(+match[1])>90 || Math.abs(+match[2])>180) return null;
   return {lat:+match[1],lng:+match[2]};
@@ -481,8 +529,8 @@ function locationCheck() {
 function updateLocation() {
   if (!$('#map-link')) return;
   const name=state.name.trim();
-  $('#map-link').innerHTML=name ? mapsLink(name,state.address,state.place?.id) : '';
-  $('#place-search').hidden=state.config?.places!==true;
+  $('#map-link').innerHTML=name ? mapsLink(name,state.address,state.place?.id,restaurantPin()) : '';
+  $('#place-search').hidden=state.config?.places===false;
   $('#location-status').textContent=state.gpsMessage || (state.config?.places===false ?
     'Use the Google Maps link to look up the address, then enter it here.' :
     'Location helps check the distance to the branch. Your GPS stays on this device.');
@@ -515,70 +563,30 @@ function requestLocation() {
     finish();
   },{enableHighAccuracy:false,timeout:10000,maximumAge:120000});
 }
-async function findPlaces() {
-  const name=state.name.trim();
-  if (name.length<2) {
-    errorAt($('#step-error'),'Enter a restaurant name to search.');
+function renderPlaces(list,{places,source}) {
+  if (!places.length) {
+    list.textContent='No matching restaurants found. Try the name with a suburb or city, or enter the address below.';
     return;
   }
-  const button=$('#place-search');
-  button.disabled=true;
-  errorAt($('#step-error'),'');
-  $('#place-results').textContent='Searching restaurants…';
-  try {
-    const result=await api('/places',{query:[name,state.address.trim()].filter(Boolean).join(', ').slice(0,220)});
-    if (state.step===2) {
-      state.lookup=result.places;
-      state.lookupSource=result.source;
-      renderPlaces(true);
-    }
-  } catch(error) {
-    if (state.step===2) {
-      $('#place-results').textContent='';
-      errorAt($('#step-error'),error.message);
-    }
-  } finally {
-    button.disabled=false;
-  }
-}
-function renderPlaces(searched=false) {
-  const list=$('#place-results');
-  if (!state.lookup.length) {
-    list.innerHTML=searched ? '<p class="field-hint">No matching restaurants found. Try adding the city, or enter the address yourself.</p>' : '';
-    return;
-  }
-  list.innerHTML=state.lookup.map((place,i)=>`<button type="button" class="place-result" data-place="${i}">${icon('pin')}<span><strong>${escape(place.name)}</strong><small>${escape(place.address)}</small></span></button>`).join('')
-    + (state.lookupSource==='osm' ? '<a class="maps-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>' :
+  list.innerHTML=places.map((place,i)=>`<button type="button" class="place-result" data-place="${i}">${icon('pin')}<span><strong>${escape(place.name)}</strong><small>${escape(place.address || 'Map pin · '+pinText(place))}</small></span></button>`).join('')
+    + (source==='osm' ? '<a class="maps-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>' :
       '<span class="maps-attribution" translate="no">Google Maps</span>');
-  const attributions=new Map(state.lookup.flatMap(place=>place.attributions||[]).map(item=>[item.provider,item.providerUri]));
+  const attributions=new Map(places.flatMap(place=>place.attributions||[]).map(item=>[item.provider,item.providerUri]));
   for (const [name,url] of attributions) {
     if (name && /^https?:\/\//.test(url)) list.insertAdjacentHTML('beforeend',`<a class="maps-attribution" href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(name)}</a>`);
   }
-  const batch=state.preparing;
-  if (batch) {
-    const slots=6-state.files.length;
-    const pending=batch.files.slice(batch.index,batch.index+slots);
-    list.insertAdjacentHTML('beforeend',pending.map((file,i)=>`<div class="file-row pending-file">
-      ${icon('camera')}<span class="truncate">${escape(file.name || 'Menu photo')}</span><small>${i===0?'Preparing…':'Waiting'}</small></div>`).join(''));
-    const total=batch.index+pending.length;
-    showPhotoProgress('prepare-progress',`Preparing photo ${batch.index+1} of ${total} on this device…`,batch.index ? batch.index/total : null);
-  } else {
-    showPhotoProgress('prepare-progress','');
-  }
-  $('#choose').disabled=$('#camera').disabled=Boolean(batch);
   list.querySelectorAll('button').forEach(button=>button.onclick=()=>{
-    const place=state.lookup[Number(button.dataset.place)];
-    state.name=place.name;
-    state.address=place.fullAddress===false ? '' : place.address;
+    const place=places[Number(button.dataset.place)];
     state.place=place;
+    state.manualPin=$('#pin-coordinates').value=pinText(place);
+    state.name=$('#restaurant-name').value=place.name;
+    state.address=$('#restaurant-address').value=place.address || state.manualPin;
     state.confirmed=false;
     state.verified=false;
-    state.lookup=[];
-    $('#restaurant-name').value=place.name;
-    $('#restaurant-address').value=state.address;
-    renderPlaces();
+    list.textContent=place.fullAddress===false ? 'Restaurant pin selected. You can add a street address if you know it.' : 'Branch location filled in.';
+    errorAt($('#step-error'),'');
     updateLocation();
-    $('#restaurant-address').focus();
+    ($('#confirm-location') || $('#menu-date')).focus({preventScroll:true});
   });
 }
 
@@ -607,7 +615,7 @@ function loadTurnstile() {
 function consentModal() {
   const ready=state.config?.generation;
   showModal('Share this menu publicly','globe',`
-    <p>To generate this menu, you must agree to publish it. The finished page will show <strong>${escape(state.name)}</strong>, the branch address, the menu date, reviewed text and AI dish images. Anyone can open and share the link.</p>
+    <p>To generate this menu, you must agree to publish it. The finished page will show <strong>${escape(state.name)}</strong>, the restaurant location, the menu date, reviewed text and AI dish images. Anyone can open and share the link.</p>
     <p>OpenAI checks the photos first. If every dish already has a photo, generation stops. Otherwise, the photos you submit will be kept and shared in the Original menu section when you publish. Your GPS stays private. Menu Lens records the requesting IP address in its private generation history.</p>
     <label class="checkbox"><input type="checkbox" id="consent">I agree to publish the restaurant details and my original menu photos.</label>
     ${ready ? '<div id="challenge" aria-label="Human verification"></div>' : notice('New menu generation is temporarily unavailable.')}
@@ -640,7 +648,7 @@ function consentModal() {
     read.textContent='Submitting…';
     showPhotoProgress('transfer-progress','Verifying submission…');
     try {
-      const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,
+      const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,pin:restaurantPin(),
         locationConfirmed:state.confirmed || !locationCheck().confirm,consent:true,shareOriginals:true,token});
       showPhotoProgress('transfer-progress','Preparing upload…');
       const pages=await Promise.all(state.files.map(async file=>{
@@ -903,7 +911,7 @@ async function openSubmission(id) {
       const output=await api(path+'/review');
       const {restaurant,date}=job;
       Object.assign(state,{step:3,submissionId:id,name:restaurant.name,address:restaurant.address,date,
-        place:restaurant.placeId ? {id:restaurant.placeId,name:restaurant.name,address:restaurant.address} : null,
+        place:restaurant.placeId ? {id:restaurant.placeId,...restaurant.pin} : null, manualPin:pinText(restaurant.pin),
         confirmed:true,read:true,verified:true,dishes:output.dishes,transcript:output.transcript,
         notes:output.notes,warnings:output.warnings,files:Array.from({length:output.photoCount},(_,i)=>({
           name:'Menu page '+(i+1),url:'/api'+path+'/photos/'+i,

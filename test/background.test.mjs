@@ -135,9 +135,9 @@ test('private uploads and approved illustrations finish with no client connected
       },
     };
   }
-  async function verify(name) {
+  async function verify(name,restaurantPin) {
     const r=await request('/api/verify','',{name,address:'Example Street',date:'2025-01-01',
-      locationConfirmed:true,consent:true,shareOriginals:true,token:'test'});
+      pin:restaurantPin,locationConfirmed:true,consent:true,shareOriginals:true,token:'test'});
     assert.equal(r.status,200);
     const {id}=await r.json();
     const cookie=r.headers.getSetCookie().find(value=>value.startsWith('ml_job=')).split(';')[0];
@@ -166,7 +166,8 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(defaults.imageModels[defaults.settings.model].high*defaults.outputUsdPerMillion/1e6,0.05268);
   assert.equal((await request(settingsPath,admin,{...newSettings,model:'gpt-image-2'})).status,400);
   assert.equal((await request(settingsPath,admin,newSettings)).status,200);
-  const first=await verify('Test kitchen');
+  const restaurantPin={lat:-41.3,lng:174.7};
+  const first=await verify('Test kitchen',restaurantPin);
   const api='/api/jobs/'+first.id;
   assert.equal((await request(api+'/upload',first.cookie,{pages:[photo]})).status,202);
   await until(()=>readCalls===1);
@@ -212,6 +213,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal((await request(api+'/retry',first.cookie,{},'2001:db8::7')).status,202);
   await until(async()=> (await (await request(api)).json()).state==='complete');
   const result=await (await request('/api/menus/'+first.id)).json();
+  assert.deepEqual(result.restaurant.pin,restaurantPin);
   assert.equal(imageRequest.model,newSettings.model);
   assert.equal(imageRequest.quality,newSettings.quality);
   const fresh=await login({pin,token:'admin-history'});

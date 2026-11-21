@@ -250,13 +250,20 @@ function details(body) {
   const date = clean(body.date,10,'Menu date');
   const calendar = new Date(date+'T00:00:00.000Z');
   const tomorrow = new Date(Date.now()+86_400_000).toISOString().slice(0,10);
-  if (!name || !address) throw new RequestError(400,'Enter the restaurant name and full address.');
+  if (!name || !address) throw new RequestError(400,'Enter the restaurant name and select its location or enter an address.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(calendar.getTime()) || calendar.toISOString().slice(0,10) !== date || date > tomorrow || date < '1900-01-01') {
     throw new RequestError(400,'Enter the date the menu was photographed.');
   }
   const placeId = typeof body.placeId === 'string' && /^[A-Za-z0-9_-]{5,180}$/.test(body.placeId) ? body.placeId : '';
   const addressKey = sha(normalize(name)+'\u0000'+normalize(address)).slice(0,24);
   const restaurant = {name,address,placeId,key:placeId ? sha(placeId).slice(0,24) : addressKey,addressKey};
+  if (body.pin!=null) {
+    const {lat,lng}=body.pin;
+    if (!Number.isFinite(lat) || Math.abs(lat)>90 || !Number.isFinite(lng) || Math.abs(lng)>180) {
+      throw new RequestError(400,'Check the latitude and longitude of the restaurant pin.');
+    }
+    restaurant.pin={lat,lng};
+  }
   return {restaurant,date,shareOriginals:body.shareOriginals===true,consentAt:new Date().toISOString()};
 }
 
