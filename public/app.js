@@ -92,11 +92,17 @@ function uploadPhotos(id,pages,onProgress) {
       if (event.lengthComputable && event.total>0) onProgress(event.loaded/event.total);
     };
     request.upload.onload=()=>onProgress(1);
+    function unconfirmed() {
+      const error=new Error('We couldn’t confirm the upload. Check its status before trying again.');
+      error.progressPath='/menu/'+id;
+      reject(error);
+    }
     request.onload=()=>{
       if (request.status===202 && request.response?.id===id) return resolve();
-      reject(new Error(request.response?.error || 'The upload could not be confirmed. Check Your submissions or try again.'));
+      if (!request.response?.error || request.status>=500) return unconfirmed();
+      reject(new Error(request.response.error));
     };
-    request.onerror=request.ontimeout=()=>reject(new Error('The upload connection was interrupted. Check Your submissions or try again.'));
+    request.onerror=request.ontimeout=unconfirmed;
     request.open('POST','/api/jobs/'+id+'/upload');
     request.responseType='json';
     request.timeout=5*60_000;
@@ -237,13 +243,13 @@ async function showMenu(id) {
 }
 
 function privacy() {
-  document.title = 'Privacy & submissions · Menu Lens';
-  page('Privacy & submissions','MENU LENS','What happens to your menu photo and location.',
+  document.title = 'Privacy · Menu Lens';
+  page('Privacy','MENU LENS','What happens to your menu photo and location.',
     `<div class="panel privacy">
       <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, reviewed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Review and remove private details before submitting.</p>
       <p>OpenAI reads your menu photos. Draft photos stay private for up to 24 hours, including when reading fails. You can retry from the same browser during that time. When you publish, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
-      <p>Your browser remembers links to recent submissions on this device. Before you approve a menu, only the browser that uploaded it can reopen the draft.</p>
+      <p>Save the menu link to return to your draft. A cookie lets you open it in the browser you used to upload.</p>
       <p>Menu Lens stores the requesting IP address alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
       <p>Cloudflare Turnstile verifies submissions. Searching in Google Maps sends your query to Google.</p>
@@ -663,11 +669,19 @@ function consentModal() {
         if (fraction>=1) showPhotoProgress('transfer-progress','Saving uploaded photos…');
         else showPhotoProgress('transfer-progress',`Uploading photos · ${Math.floor(fraction*100)}%`,fraction);
       });
-      remember(verified.id,state.name,true);
       location.assign('/menu/'+verified.id);
     } catch(err) {
       showPhotoProgress('transfer-progress','');
       errorAt(error,err.message);
+      if (err.progressPath) {
+        const link=document.createElement('a');
+        link.className='text-link';
+        link.href=err.progressPath;
+        link.target='_blank';
+        link.rel='noopener';
+        link.textContent='Check this upload';
+        error.append(' ',link);
+      }
       if (widget!==undefined) window.turnstile.reset(widget);
     } finally {
       token='';
@@ -683,6 +697,7 @@ function reviewStep() {
   const limit=state.config?.maxDishes || 100;
   flow.insertAdjacentHTML('beforeend',`
     <h2>Review the original details</h2><p class="muted">Check each name, description and price against the source. Leave a price blank if one wasn’t printed.</p>
+    <button type="button" class="btn quiet small" id="copy-draft-link">${icon('link')} Copy return link</button>
     <div class="fields">
       ${state.warnings.length ? notice(state.warnings.join(' ')) : ''}
       <div class="review-grid"><ol id="dish-editors"></ol><aside class="source-pages" aria-label="Uploaded photos">
@@ -700,6 +715,7 @@ function reviewStep() {
     </div>`);
   const reviewed=$('#reviewed');
   const publish=$('#publish');
+  $('#copy-draft-link').onclick=()=>share('Return link');
   const sync=()=>{
     $('#add-dish').disabled=state.dishes.length>=limit;
     publish.disabled=!reviewed.checked || !state.dishes.length || state.dishes.length>limit;
@@ -755,7 +771,6 @@ function reviewStep() {
     try {
       const result=await api('/jobs/'+state.submissionId+'/publish',{reviewed:reviewed.checked,
         dishes:state.dishes,notes:state.notes,transcript:state.transcript});
-      remember(result.id,state.name,true);
       location.replace('/menu/'+result.id);
     } catch(error) {
       if (error.status===403) {
@@ -773,36 +788,6 @@ function reviewStep() {
   };
 }
 
-const savedPrefix='menu-lens-submission-';
-function savedSubmissions() {
-  try {
-    return Object.keys(localStorage).filter(key=>key.startsWith(savedPrefix)).flatMap(key=>{
-      try {
-        const item=JSON.parse(localStorage.getItem(key));
-        return /^[a-f0-9]{20}$/.test(item?.id) && typeof item.name==='string' ? [item] : [];
-      } catch {return [];}
-    }).sort((a,b)=>b.saved-a.saved);
-  } catch {return [];}
-}
-function remember(id,name,updated=false) {
-  try {
-    const key=savedPrefix+id;
-    if (updated || !localStorage.getItem(key)) localStorage.setItem(key,JSON.stringify({id,name,saved:Date.now()}));
-    for (const item of savedSubmissions().slice(20)) localStorage.removeItem(savedPrefix+item.id);
-  } catch {}
-}
-function revealReturnLink() {
-  if (!savedSubmissions().length) return;
-  $('#return-bar').hidden=false;
-}
-async function recoverSubmissions() {
-  // Also recover an upload whose acknowledgement was lost, or a job from an older client.
-  try {
-    const job=await api('/job');
-    if (job) remember(job.id,job.name || 'Your menu');
-  } catch {}
-  revealReturnLink();
-}
 const labels={waiting:'Waiting to read',reading:'Reading the menu',review:'Ready to review',
   uploading:'Uploading photos',already_illustrated:'Every dish already has a photo',read_error:'Menu reading stopped',queued:'Waiting for illustrations',running:'Illustrating dishes',
   error:'Images need attention',complete:'Published'};
@@ -880,29 +865,9 @@ function watchJob(id,onStatus,onError) {
   void refresh();
   return stop;
 }
-async function submissions() {
-  document.title='Your submissions · Menu Lens';
-  page('Your submissions','MENU LENS','Reopen a menu you started in this browser.',
-    '<div class="saved-list" id="saved-list"><p class="muted">Loading your submissions…</p></div>');
-  await recoverSubmissions();
-  const items=savedSubmissions();
-  const list=$('#saved-list');
-  if (!items.length) {
-    list.innerHTML=`<div class="panel"><h2>No submissions yet</h2><a class="text-link" href="/create">Upload a menu</a></div>`;
-    return;
-  }
-  list.innerHTML=items.map(item=>`<a class="panel saved-menu" href="/menu/${item.id}">
-    <span><strong>${escape(item.name)}</strong><small data-status="${item.id}">Check progress</small></span>${icon('book')}</a>`).join('');
-  for (const item of items) {
-    const status=$(`[data-status="${item.id}"]`,list);
-    watchJob(item.id,job=>{status.textContent=statusLabel(job);},error=>{
-      status.textContent=error.status===404?'Submission unavailable':'Reconnecting…';
-    });
-  }
-}
 async function openSubmission(id) {
   const path='/jobs/'+id;
-  const back=pagesBack('/submissions','Your submissions');
+  const back=pagesBack('/explore','Explore menus');
   document.title='Menu progress · Menu Lens';
   if (!$('#job-opening')) page('Opening your menu','MENU LENS','','',back);
   watchJob(id,async job=>{
@@ -916,7 +881,6 @@ async function openSubmission(id) {
         notes:output.notes,warnings:output.warnings,files:Array.from({length:output.photoCount},(_,i)=>({
           name:'Menu page '+(i+1),url:'/api'+path+'/photos/'+i,
         }))});
-      remember(id,job.name);
       page(escape(job.name),'MENU REVIEW','Your menu is ready to check. Review it within 24 hours of uploading.',
         '<section class="panel review-panel" id="flow"></section>',back);
       document.title='Review '+job.name+' · Menu Lens';
@@ -960,7 +924,7 @@ async function openSubmission(id) {
     const meter=$('#job-meter');
     meter.hidden=!active && !images;
     if (images) {meter.max=job.total;meter.value=job.completed;} else meter.removeAttribute('value');
-    $('#job-return').textContent=active && job.state!=='uploading' ? (images?'You can close this page. Your finished menu will appear at this link.':'You can close this page. Return here in this browser to review your menu.') : '';
+    $('#job-return').textContent=active && job.state!=='uploading' ? (images?'Copy this link before closing the page. Your finished menu will appear here.':'Copy this link before closing the page. Open it in the same browser to review your menu.') : '';
     if (job.state==='read_error' && job.pageCount) {
       const until=new Date(job.expires).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
       $('#job-return').textContent=`Your photos are private until ${until}. `+(job.canRetryRead?'You can retry with these photos.':'This draft has used all three reading attempts.');
@@ -973,7 +937,6 @@ async function openSubmission(id) {
       try {
         if (job.canRetryRead) await api(path+'/retry-read',{attempt:job.readAttempt});
         else await api(path+'/retry',{});
-        remember(id,job.name,true);
         void openSubmission(id);
       } catch(error) {errorAt($('#job-error'),error.message);retry.disabled=false;}
     };
@@ -994,36 +957,20 @@ async function openSubmission(id) {
   });
 }
 
+// Remove the list saved by older versions when this browser next visits.
+try {
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith('menu-lens-submission-')) localStorage.removeItem(key);
+  }
+} catch {}
+
 const route = location.pathname.replace(/\/$/,'') || '/';
 if (route==='/') void home();
 else if (route==='/admin') void import('./admin.js?v=2').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();
-else if (route==='/submissions') void submissions();
 else if (route.startsWith('/menu/')) {
   void openSubmission(route.split('/')[2]);
   window.addEventListener('pageshow',event=>{if (event.persisted) location.reload();});
-}
-if (['/','/create','/explore'].includes(route)) {
-  revealReturnLink();
-  let stopLatest;
-  function followLatest() {
-    stopLatest?.();
-    const latest=savedSubmissions()[0];
-    const link=$('#latest-progress');
-    link.hidden=true;
-    if (!latest) return;
-    revealReturnLink();
-    stopLatest=watchJob(latest.id,job=>{
-      link.hidden=job.state==='complete';
-      link.href='/menu/'+latest.id;
-      link.textContent=job.name+' · '+statusLabel(job);
-    },()=>{link.hidden=true;});
-  }
-  void recoverSubmissions().then(followLatest);
-  window.addEventListener('storage',event=>{if (event.key?.startsWith(savedPrefix)) followLatest();});
-}
-if (route==='/submissions') {
-  window.addEventListener('storage',event=>{if (event.key?.startsWith(savedPrefix)) location.reload();});
 }

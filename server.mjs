@@ -238,7 +238,7 @@ function progressDocument(menu) {
   const title=status ? escape(status.name) : 'Opening your submission';
   const message=status ? `${status.completed} of ${status.total} dish images ready` : 'Checking your menu’s progress…';
   const content=`<main id="main" class="shell"><div class="page" id="job-opening">
-    <a class="breadcrumb" href="/submissions">Your submissions</a><div class="page-heading">
+    <a class="breadcrumb" href="/explore">Explore menus</a><div class="page-heading">
     <p class="eyebrow page-kicker">MENU SUBMISSION</p><h1 class="page-title">${title}</h1>
     <p class="page-intro">${message}</p></div></div></main>`;
   return document.replace(/<main id="main"[\s\S]*?<\/main>/,()=>content);
@@ -617,13 +617,6 @@ async function api(req,res,path) {
   }
   const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|retry-read|retry|photos\/[0-5]))?$/);
   if (job) return jobApi(req,res,job[1],job[2]);
-  if (path === '/api/job' && get) {
-    const owner = session(req,false);
-    const row = owner && db.prepare('SELECT * FROM menus WHERE owner=?').get(owner.id);
-    if (row) return write(res,200,jobStatus(row,owner.id));
-    const draft = owner && db.prepare('SELECT id FROM drafts WHERE owner=?').get(owner.id);
-    return write(res,200,draft ? {...draft,name:JSON.parse(owner.details).restaurant.name} : null);
-  }
   if (req.method !== 'POST') throw new RequestError(404,'This page could not be found.');
   if (path === '/api/places') {
     limit(req,'places',24,600);
@@ -714,10 +707,10 @@ const server = createServer(async (req,res)=>{
       if (!row) throw new RequestError(404,'Image not found.');
       return write(res,200,await getObject(row.object_key),mime.webp,{'Cache-Control':'public, max-age=31536000, immutable'});
     }
-    if (path==='/menu/osteria-verde') return write(res,301,'',mime.html,{Location:'/explore'});
+    if (path==='/submissions' || path==='/menu/osteria-verde') return write(res,301,'',mime.html,{Location:'/explore'});
     const parts = path.split('/');
     const id = parts.length===3 && parts[1]==='menu' ? parts[2] : '';
-    if (['/','/create','/explore','/privacy','/submissions'].includes(path) || publicId.test(id)) {
+    if (['/','/create','/explore','/privacy'].includes(path) || publicId.test(id)) {
       let html = document;
       if (id) {
         const row=db.prepare('SELECT * FROM menus WHERE id=?').get(id);

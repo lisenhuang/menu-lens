@@ -170,6 +170,11 @@ test('private uploads and approved illustrations finish with no client connected
   const first=await verify('Test kitchen',restaurantPin);
   const api='/api/jobs/'+first.id;
   assert.equal((await request(api+'/upload',first.cookie,{pages:[photo]})).status,202);
+  const retiredPage=await fetch(origin+'/submissions',{redirect:'manual'});
+  assert.equal(retiredPage.status,301);
+  assert.equal(retiredPage.headers.get('location'),'/explore');
+  assert.doesNotMatch(await (await request('/explore')).text(),/href="\/submissions"/);
+  assert.equal((await request('/api/job',first.cookie)).status,404);
   await until(()=>readCalls===1);
   assert.equal((await request(api)).status,404);
   assert.equal((await request(api+'/events')).status,404);

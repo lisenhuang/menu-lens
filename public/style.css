@@ -213,14 +213,6 @@ dialog .btn{max-width:100%;white-space:normal}
 .collection-empty{grid-column:1/-1;background:var(--wash)}
 .collection-empty .btn{margin-top:1rem}
 
-.return-bar{background:var(--wash);border-bottom:1px solid var(--line)}
-.return-bar .shell{padding-block:.48rem}
-.saved-list{display:grid;gap:.65rem;max-width:680px}
-.saved-menu{display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:1rem 1.2rem}
-.saved-menu:hover{border-color:var(--green)}
-.saved-menu strong,.saved-menu small{display:block}
-.saved-menu small{color:var(--muted)}
-.saved-menu [data-icon]{color:var(--green)}
 .progress-panel{max-width:650px}
 .job-stages{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));list-style:none;padding:0;margin:0 0 1.5rem;gap:.4rem}
 .job-stages li{color:var(--muted);font-size:.8rem;font-weight:600}
@@ -232,8 +224,6 @@ dialog .btn{max-width:100%;white-space:normal}
 #job-message{margin:.45rem 0;overflow-wrap:anywhere}
 #image-count{display:block;color:var(--green);font-variant-numeric:tabular-nums}
 #image-count:empty{display:none}
-.return-bar .shell{display:flex;align-items:baseline;gap:.25rem 1.2rem;flex-wrap:wrap}
-#latest-progress{font-size:.87rem;overflow-wrap:anywhere}
 .progress-panel .inline-actions{margin-top:1.1rem}
 .review-panel{max-width:850px}
 
