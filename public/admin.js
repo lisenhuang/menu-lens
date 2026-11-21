@@ -53,8 +53,8 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
     const {imageModels,readingModel,readingEfforts}=data;
     let saved=data.settings;
     const options=values=>values.map(v=>`<option value="${escape(v)}">${escape(v)}</option>`).join('');
-    view('Generation settings','Choose how new menu uploads are read and illustrated.',`
-      <form class="panel admin-panel fields" id="admin-settings">
+    view('Generation dashboard','Manage generation settings and review costs for each menu.',`
+      <div class="admin-layout"><form class="panel admin-panel fields" id="admin-settings">
         <h2>Dish illustrations</h2>
         <label class="field">Image model<select class="control" name="model">${options(Object.keys(imageModels))}</select></label>
         <label class="field">Image quality<select class="control" name="quality"></select></label>
@@ -68,7 +68,13 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
         <p id="admin-message" role="status"></p>
         <div class="inline-actions"><button class="btn primary" type="submit" disabled>Save settings</button>
         <button class="btn quiet" type="button" id="sign-out">Sign out</button></div>
-      </form>`);
+      </form>
+      <section class="panel history-panel" aria-labelledby="history-heading">
+        <div class="history-heading"><h2 id="history-heading">Generation history</h2><button type="button" id="refresh-history" class="btn quiet small">Refresh</button></div>
+        <p class="field-hint">Estimated USD at standard API rates. Open a menu to see each request, including retries.</p>
+        <div id="history-list"></div><p id="history-message" role="status"></p>
+        <button id="history-more" class="btn quiet small" type="button" hidden>Load older menus</button>
+      </section></div>`);
     const form=document.querySelector('#admin-settings');
     const {model,quality,reasoning}=form.elements;
     const save=form.querySelector('[type="submit"]'),message=form.querySelector('#admin-message');
@@ -106,6 +112,68 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
       catch(error) {if(error.status===401) return login();message.textContent=error.message;}
     };
     sync();
+    showHistory();
+  }
+  function showHistory() {
+    const list=document.querySelector('#history-list'),more=document.querySelector('#history-more');
+    const refresh=document.querySelector('#refresh-history'),message=document.querySelector('#history-message');
+    let cursor=null;
+    const currency=amount=>'$'+amount.toFixed(6).replace(/0+$/,'').replace(/\.$/,'.00');
+    const when=value=>new Date(value).toLocaleString('en-NZ',{dateStyle:'medium',timeStyle:'short'});
+    function entry(run) {
+      const partial=run.legacy || run.priced<run.attempts;
+      const amount=run.usd===null ? 'Not recorded' : currency(run.usd);
+      const basis=run.usd===null ? (run.legacy?'Historical menu':'No priced calls yet') :
+        partial ? 'Partial estimate' : run.estimates ? 'Includes output estimates' : 'From reported usage';
+      const reference=run.benchmark ? `<p class="field-hint">Output-only benchmark for ${run.benchmark.count} saved images at ${escape(run.benchmark.model)} / ${escape(run.benchmark.quality)}: ${currency(run.benchmark.usd)}. Actual historical charges are unavailable.</p>` : '';
+      return `<details class="history-run" data-run="${escape(run.id)}"><summary>
+        <span><strong>${escape(run.restaurant)}</strong><small>${escape(when(run.recorded))} · ${escape(run.state)}</small></span>
+        <span class="history-price"><strong>${amount}</strong><small>${basis}</small></span></summary>
+        <div class="history-details"><p><strong>Upload IP</strong> ${escape(run.uploadIp || 'Not recorded')}</p>
+        ${run.imageIp && run.imageIp!==run.uploadIp ? `<p><strong>Image request IP</strong> ${escape(run.imageIp)}</p>` : ''}
+        ${reference}<div class="history-calls"></div></div></details>`;
+    }
+    function callRow(call) {
+      const amount=call.usd===null ? 'Cost unknown' : currency(call.usd);
+      return `<li><div><strong>${escape(call.label)}</strong><small>${escape(when(call.started))} · ${escape(call.state)}</small>
+        <small>${escape(call.model)} · ${escape(call.level)} · IP ${escape(call.ip || 'not recorded')}</small></div>
+        <span class="history-price"><strong>${amount}</strong><small>${escape(call.basis)}</small></span></li>`;
+    }
+    async function load(older) {
+      more.disabled=refresh.disabled=true;
+      message.textContent='Loading history…';
+      try {
+        const {runs,next}=await api('/admin/history'+(older ? '?before='+cursor : ''));
+        if (!older) list.replaceChildren();
+        for (const run of runs) {
+          list.insertAdjacentHTML('beforeend',entry(run));
+          const details=list.lastElementChild;
+          details.addEventListener('toggle',async()=>{
+            if (!details.open || details.dataset.loaded) return;
+            const target=details.querySelector('.history-calls');
+            details.dataset.loaded='loading';
+            target.textContent='Loading requests…';
+            try {
+              const {calls}=await api('/admin/history/'+run.id);
+              target.innerHTML=calls.length ? '<ul>'+calls.map(callRow).join('')+'</ul>' : '<p>No recorded API requests.</p>';
+              details.dataset.loaded='yes';
+            } catch(error) {
+              if (error.status===401) return login();
+              delete details.dataset.loaded;
+              target.textContent='Could not load requests. Close and reopen to retry.';
+            }
+          });
+        }
+        cursor=next;more.hidden=!next;
+        message.textContent=list.children.length ? '' : 'No generations yet.';
+      } catch(error) {
+        if (error.status===401) return login();
+        message.textContent=error.message;
+      } finally {more.disabled=refresh.disabled=false;}
+    }
+    more.onclick=()=>load(true);
+    refresh.onclick=()=>load(false);
+    void load(false);
   }
   async function loadSettings() {
     try {settingsForm(await api('/admin/settings'));}

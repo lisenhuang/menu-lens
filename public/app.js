@@ -203,6 +203,7 @@ function privacy() {
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Review and remove private details before submitting.</p>
       <p>The original uploaded photo is used to read the menu with OpenAI and is kept out of the public page. Menu Lens keeps the photos privately for your review. They are removed when you submit the reviewed menu or when the draft expires after 24 hours.</p>
       <p>Your browser remembers links to recent submissions on this device. Before you approve a menu, only the browser that uploaded it can reopen the draft.</p>
+      <p>Menu Lens stores the requesting IP address alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
       <p>Cloudflare Turnstile verifies submissions. Searching in Google Maps sends your query to Google.</p>
       <p>New Zealand restaurant search uses <a class="text-link" href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>. The <a class="text-link" href="/data/nz-restaurants.json">New Zealand restaurant index</a> is available under the Open Database Licence.</p>
@@ -543,7 +544,7 @@ function consentModal() {
   const ready=state.config?.generation;
   showModal('Share this menu publicly','globe',`
     <p>To generate this menu, you must agree to publish it. The finished page will show <strong>${escape(state.name)}</strong>, the branch address, the menu date, reviewed text and AI dish images. Anyone can open and share the link.</p>
-    <p>OpenAI reads the uploaded photos. Your original uploads and GPS location stay off the published page.</p>
+    <p>OpenAI reads the uploaded photos. Your photos and GPS stay off the published page. Menu Lens records the requesting IP address in its private generation history.</p>
     <label class="checkbox"><input type="checkbox" id="consent">I agree to publish this menu and the restaurant details.</label>
     ${ready ? '<div id="challenge" aria-label="Human verification"></div>' : notice('New menu generation is temporarily unavailable.')}
     <p class="error" id="verify-error" role="alert" hidden></p>
@@ -842,7 +843,7 @@ async function openSubmission(id) {
 
 const route = location.pathname.replace(/\/$/,'') || '/';
 if (route==='/') void home();
-else if (route==='/admin') void import('./admin.js?v=1').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
+else if (route==='/admin') void import('./admin.js?v=2').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();

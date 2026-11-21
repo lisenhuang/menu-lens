@@ -6,6 +6,7 @@ import {dirname, extname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {generateDish, googlePlaces, readMenu, RequestError, verifyPerson} from './providers.mjs';
 
+import {generationHistory} from './usage.mjs';
 import {imageModels, matchesPin, outputUsdPerMillion, readingEfforts, validateSettings} from './admin.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +60,12 @@ function settings() {
   return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium',reasoning:'minimal'};
 }
 
+const history = generationHistory(db);
+function readForRun(id,pages) {
+  const model=environment.OPENAI_VISION_MODEL || 'gpt-5-mini';
+  const {reasoning}=settings();
+  return history.measure(id,'read','Menu transcription',model,reasoning,received=>readMenu(pages,reasoning,received));
+}
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
 const placesData = placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
 const nzPlaces = placesData ? JSON.parse(placesData).places.map(place=>({
@@ -214,7 +221,7 @@ async function readDrafts() {
       WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
       db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
       try {
-        const output = await readMenu(JSON.parse(draft.pages),settings().reasoning);
+        const output = await readForRun(draft.id,JSON.parse(draft.pages));
         if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
         db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
       } catch (error) {
@@ -246,7 +253,8 @@ async function runQueue() {
         for (let i=0;i<remaining.length;i+=2) {
           const results = await Promise.allSettled(remaining.slice(i,i+2).map(async item=>{
             if (!rate('images:daily',dayLimit,86_400_000)) throw new RequestError(429,'Daily image capacity reached.');
-            const bytes = await generateDish(item.dish,imageConfig);
+            const bytes = await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,
+              received=>generateDish(item.dish,imageConfig,received));
             db.prepare('INSERT INTO dish_images VALUES (?,?,?)').run(row.id,item.i,bytes);
           }));
           if (results.some(result=>result.status==='rejected')) throw new Error('Image batch unfinished');
@@ -307,6 +315,8 @@ async function publish(req,res,id,owner,fromDraft) {
   try {
     db.prepare("INSERT INTO menus (id,owner,restaurant_key,date,created,payload,state) VALUES (?,?,?,?,?,?,'queued')")
       .run(id,owner.id,restaurant.key,date,new Date().toISOString(),JSON.stringify(payload));
+    history.register(id,restaurant.name,clientIp(req));
+    history.imageRequester(id,clientIp(req));
     db.prepare('DELETE FROM drafts WHERE owner=?').run(owner.id);
     db.exec('COMMIT');
   } catch (error) {
@@ -321,6 +331,7 @@ function retryImages(req,res,id,owner) {
   checkImageQueue();
   const retried = db.prepare("UPDATE menus SET state='queued', attempts=attempts+1 WHERE id=? AND owner=? AND state='error' AND attempts<3").run(id,owner);
   if (!retried.changes) throw new RequestError(409,'This menu cannot be retried right now.');
+  history.imageRequester(id,clientIp(req));
   queue();
   return write(res,202,{ok:true});
 }
@@ -359,7 +370,12 @@ async function jobApi(req,res,id,action) {
       const outstanding = db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('waiting','reading')").get().count;
       if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
       reserveRead(owner);
-      db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'waiting',?)").run(id,owner,JSON.stringify(body.pages));
+      db.exec('BEGIN');
+      try {
+        db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'waiting',?)").run(id,owner,JSON.stringify(body.pages));
+        history.register(id,JSON.parse(active.details).restaurant.name,clientIp(req));
+        db.exec('COMMIT');
+      } catch(error) {db.exec('ROLLBACK');throw error;}
       queueReading();
       return write(res,202,{id});
     }
@@ -386,6 +402,14 @@ async function adminApi(req,res,path) {
   if (!id || !db.prepare('SELECT 1 FROM admin_sessions WHERE id=? AND expires>?').get(id,Date.now())) {
     throw new RequestError(401,'Sign in to manage generation settings.');
   }
+  if (path==='/api/admin/history' && req.method==='GET') {
+    const raw=new URL(req.url,'http://localhost').searchParams.get('before');
+    const before=raw===null ? Number.MAX_SAFE_INTEGER : Number(raw);
+    if (!Number.isSafeInteger(before) || before<1) throw new RequestError(400,'Invalid history page.');
+    return write(res,200,history.list(before));
+  }
+  const runId=path.match(/^\/api\/admin\/history\/([a-f0-9]{20})$/)?.[1];
+  if (runId && req.method==='GET') return write(res,200,{calls:history.calls(runId)});
   if (path==='/api/admin/logout' && req.method==='POST') {
     db.prepare('DELETE FROM admin_sessions WHERE id=?').run(id);
     return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_admin=${cookieSuffix}; Max-Age=0`});
@@ -466,7 +490,9 @@ async function api(req,res,path) {
     const body = await json(req,16_000_000);
     validatePages(body);
     reserveRead(owner.id);
-    const output = await readMenu(body.pages,settings().reasoning);
+    const id=submissionId(owner.id);
+    history.register(id,JSON.parse(owner.details).restaurant.name,clientIp(req));
+    const output = await readForRun(id,body.pages);
     if (!output.isMenu) throw new RequestError(422,'This does not look like a restaurant menu. Upload clear photos of the menu.');
     db.prepare('UPDATE sessions SET read_success=1 WHERE id=?').run(owner.id);
     return write(res,200,output);

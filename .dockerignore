@@ -3,5 +3,6 @@
 !server.mjs
 !providers.mjs
 !admin.mjs
+!usage.mjs
 !public/
 !public/**

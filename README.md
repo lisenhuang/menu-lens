@@ -25,7 +25,7 @@ node --test
 | Task | Configuration |
 | --- | --- |
 | Enable generation | Set `OPENAI_API_KEY`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` and `TURNSTILE_HOSTNAME` in `.env`. Run `node --env-file=.env server.mjs`. |
-| Configure AI | Open `/admin` to choose an image model, compare output costs and adjust image quality or menu-reading effort. The server reads `ADMIN_PIN_VERIFIER` from its private environment. |
+| Configure AI | Open `/admin` to choose an image model, adjust quality and review private per-generation cost and IP history. The server reads `ADMIN_PIN_VERIFIER` from its private environment. |
 | Runtime defaults | `OPENAI_IMAGE_MODEL`, `OPENAI_VISION_MODEL`, `DAILY_IMAGE_LIMIT` (120 by default). |
 | Find restaurants | Set `NZ_RESTAURANT_INDEX` or `GOOGLE_PLACES_API_KEY`. GPS comparisons stay on the device. |
 | Deploy to Oracle | Set `MENU_ORACLE_HOST` and optionally `MENU_ORACLE_IDENTITY`, then run `./deploy.sh`. Cloudflare Tunnel serves the site. SQLite persists in `menu-lens-data`. |
