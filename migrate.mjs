@@ -15,7 +15,7 @@ if (mode==='site') {
     .map(f=>join(f.parentPath,f.name).slice(source.length+1)).sort();
   const version=digest(files.map(name=>name+' '+digest(readFileSync(join(source,name)))).join('\n'));
   const prefix='site/'+version;
-  const types={css:'text/css',html:'text/html',js:'application/javascript',webp:'image/webp',svg:'image/svg+xml',woff2:'font/woff2',txt:'text/plain'};
+  const types={css:'text/css',html:'text/html',js:'application/javascript',json:'application/json',webp:'image/webp',svg:'image/svg+xml',woff2:'font/woff2',txt:'text/plain'};
   for (const name of files) await copy(prefix+'/'+name,readFileSync(join(source,name)),types[name.split('.').at(-1)]);
   console.log(prefix);
 } else if (mode==='map-key') {

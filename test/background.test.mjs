@@ -34,6 +34,7 @@ test('private uploads and approved illustrations finish with no client connected
   let imageCalls=0;
   let readCalls=0;
   let failReading=false;
+  let googleResults=[], placesRequest;
   const provider=createServer(async (req,res)=>{
     const chunks=[];
     for await (const chunk of req) chunks.push(chunk);
@@ -52,6 +53,9 @@ test('private uploads and approved illustrations finish with no client connected
       const isAdmin=token.startsWith('admin-');
       response={success:!isAdmin || !usedChallenges.has(token),hostname:'localhost',action:isAdmin?'admin_login':'menu_submit'};
       usedChallenges.add(token);
+    } else if (req.url==='/v1/places:searchText') {
+      placesRequest=JSON.parse(body);
+      response={places:googleResults};
     } else if (req.url==='/v1/responses') {
       readingRequest=JSON.parse(body);
       readCalls++;
@@ -105,7 +109,7 @@ test('private uploads and approved illustrations finish with no client connected
     child=fork(new URL('../server.mjs',import.meta.url),[],{
       silent:true,execArgv:['--import','data:text/javascript,'+encodeURIComponent(preload)],
       env:{...process.env,R2_GATEWAY_URL:'http://localhost/__storage/',R2_GATEWAY_SECRET:'test-storage',OPENAI_IMAGE_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
-        OPENAI_API_KEY:'test',TURNSTILE_SECRET:'test',TURNSTILE_SITE_KEY:'test',TURNSTILE_HOSTNAME:'localhost',TURNSTILE_TEST:'0',ADMIN_PIN_VERIFIER:verifier,TRUST_CLOUDFLARE:'1'},
+        OPENAI_API_KEY:'test',GOOGLE_PLACES_API_KEY:'test',TURNSTILE_SECRET:'test',TURNSTILE_SITE_KEY:'test',TURNSTILE_HOSTNAME:'localhost',TURNSTILE_TEST:'0',ADMIN_PIN_VERIFIER:verifier,TRUST_CLOUDFLARE:'1'},
     });
     await until(()=>fetch(origin+'/healthz').then(r=>r.ok).catch(()=>false));
   }
@@ -144,6 +148,23 @@ test('private uploads and approved illustrations finish with no client connected
     return {id,cookie};
   }
   await start();
+  await t.test('restaurant name search lists distinct branches and accepts suburb names',async()=>{
+    const search=async query=>(await request('/api/places','',{query})).json();
+    const {places}=await search('mibo');
+    assert.deepEqual(places.map(p=>p.branch).sort(),['Milford','Mount Eden','Wynyard Quarter']);
+    assert.deepEqual((await search('MIBO Bakery Mt Eden')).places.map(p=>p.branch),['Mount Eden']);
+    const eden=places.find(p=>p.branch==='Mount Eden');
+    googleResults=[{id:'google-test-eden',displayName:{text:'MIBO'},formattedAddress:eden.address,
+      location:{latitude:eden.lat,longitude:eden.lng}}];
+    const mixed=await search('mibo');
+    assert.equal(placesRequest.regionCode,'NZ');
+    assert.equal(placesRequest.includedType,undefined);
+    assert.equal(placesRequest.pageSize,20);
+    assert.equal(mixed.source,'google');
+    assert.equal(mixed.places[0].id,'google-test-eden');
+    assert.deepEqual(mixed.places.map(p=>p.branch).sort(),['Milford','Mount Eden','Wynyard Quarter']);
+    googleResults=[];
+  });
   const settingsPath='/api/admin/settings';
   const login=body=>request('/api/admin/login','',body);
   assert.equal((await request('/api/admin/history')).status,401);

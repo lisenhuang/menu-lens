@@ -61,11 +61,11 @@ function pinText(pin) {
 }
 function mapsUrl(name,address='',id='',pin) {
   const params = new URLSearchParams({api:'1',query:pinText(pin) || [name,address].filter(Boolean).join(', ')});
-  if (id && !id.startsWith('osm-')) params.set('query_place_id',id);
+  if (id && !/^(osm|venue)-/.test(id)) params.set('query_place_id',id);
   return 'https://www.google.com/maps/search/?'+params;
 }
-function mapsLink(name,address,id,pin) {
-  return `<a class="text-link" href="${escape(mapsUrl(name,address,id,pin))}" target="_blank" rel="noopener noreferrer">Google Maps ${icon('external')}</a>`;
+function mapsLink(name,address,id,pin,label='Google Maps') {
+  return `<a class="text-link" href="${escape(mapsUrl(name,address,id,pin))}" target="_blank" rel="noopener noreferrer">${label} ${icon('external')}</a>`;
 }
 const notice = (text,name='info')=>`<p class="notice">${icon(name)}<span>${escape(text)}</span></p>`;
 const pagesBack = (href,label)=>`<a class="breadcrumb" href="${href}">${icon('back')} ${label}</a>`;
@@ -535,7 +535,8 @@ function locationCheck() {
 function updateLocation() {
   if (!$('#map-link')) return;
   const name=state.name.trim();
-  $('#map-link').innerHTML=name ? mapsLink(name,state.address,state.place?.id,restaurantPin()) : '';
+  $('#map-link').innerHTML=name ? mapsLink(name,state.address || 'New Zealand',state.place?.id,restaurantPin(),
+    state.place ? 'View branch on Google Maps' : 'Search Google Maps') : '';
   $('#place-search').hidden=state.config?.places===false;
   $('#location-status').textContent=state.gpsMessage || (state.config?.places===false ?
     'Use the Google Maps link to look up the address, then enter it here.' :
@@ -571,12 +572,13 @@ function requestLocation() {
 }
 function renderPlaces(list,{places,source}) {
   if (!places.length) {
-    list.textContent='No matching restaurants found. Try the name with a suburb or city, or enter the address below.';
+    list.textContent='No matches in this directory. Try a suburb or city, or use Search Google Maps above.';
     return;
   }
-  list.innerHTML=places.map((place,i)=>`<button type="button" class="place-result" data-place="${i}">${icon('pin')}<span><strong>${escape(place.name)}</strong><small>${escape(place.address || 'Map pin · '+pinText(place))}</small></span></button>`).join('')
+  list.innerHTML=`<strong>${places.length===1?'1 match':places.length+' matches'} · Choose your branch</strong>`
+    + places.map((place,i)=>`<button type="button" class="place-result" data-place="${i}">${icon('pin')}<span><strong>${escape([place.name,place.branch].filter(Boolean).join(' · '))}</strong><small>${escape(place.address || 'Map pin · '+pinText(place))}</small></span></button>`).join('')
     + (source==='osm' ? '<a class="maps-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>' :
-      '<span class="maps-attribution" translate="no">Google Maps</span>');
+      source==='google' ? '<span class="maps-attribution" translate="no">Google Maps</span>' : '');
   const attributions=new Map(places.flatMap(place=>place.attributions||[]).map(item=>[item.provider,item.providerUri]));
   for (const [name,url] of attributions) {
     if (name && /^https?:\/\//.test(url)) list.insertAdjacentHTML('beforeend',`<a class="maps-attribution" href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(name)}</a>`);

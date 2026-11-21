@@ -107,13 +107,11 @@ export async function generateDish(dish,{model,quality},received) {
   return bytes;
 }
 
-export async function googlePlaces(query, coordinates) {
+export async function googlePlaces(query) {
   const key = process.env.GOOGLE_PLACES_API_KEY;
   if (!key) return {places:[]};
-  const body = {textQuery:query, includedType:'restaurant', pageSize:6};
-  if (coordinates) {
-    body.locationBias = {circle:{center:{latitude:coordinates.lat, longitude:coordinates.lng},radius:12000}};
-  }
+  const body = {textQuery:query,pageSize:20,regionCode:'NZ',languageCode:'en',
+    locationBias:{rectangle:{low:{latitude:-47.4,longitude:166.3},high:{latitude:-34.3,longitude:178.6}}}};
   try {
     const response = await fetch('https://places.googleapis.com/v1/places:searchText',{
       method:'POST',

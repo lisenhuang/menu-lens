@@ -28,7 +28,7 @@ node --test
 | Connect storage | Deploy `storage/wrangler.jsonc` with its private R2 bucket. Set the same random secret as `STORAGE_SECRET` on the Worker and `R2_GATEWAY_SECRET` on the server. Set `R2_GATEWAY_URL` to the Worker route, including its trailing slash. |
 | Configure AI | Open `/admin` to choose an image model, adjust quality and review private per-generation cost and IP history. The server reads `ADMIN_PIN_VERIFIER` from its private environment. |
 | Runtime defaults | `OPENAI_IMAGE_MODEL=gpt-image-2.6-sunburst` at high quality, `OPENAI_VISION_MODEL=gpt-5-mini` with high reasoning, `DAILY_IMAGE_LIMIT=120`. |
-| Find restaurants | Set `NZ_RESTAURANT_INDEX` or `GOOGLE_PLACES_API_KEY`. GPS comparisons stay on the device. |
+| Find restaurants | Set a server-side `GOOGLE_PLACES_API_KEY` for Google Places Text Search (New). Search also supports an OpenStreetMap index (`NZ_RESTAURANT_INDEX`) and restaurant-published branch directories. GPS comparisons stay on the device. |
 | Deploy to Oracle | Set `MENU_ORACLE_HOST` and optionally `MENU_ORACLE_IDENTITY`, then run `./deploy.sh`. Cloudflare Tunnel serves the site. SQLite stores records in `menu-lens-data`. Cloudflare R2 stores originals, dish images, site assets and the restaurant index. |
 
 The New Zealand restaurant index uses OpenStreetMap data under the ODbL. Rebuild it with `tools/extract-nz-restaurants.py` and Python’s `osmium` package. [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)

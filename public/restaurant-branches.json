@@ -1,0 +1,30 @@
+[
+  {
+    "name": "MIBO",
+    "aliases": ["MIBO Bakery", "MIBO Cafe"],
+    "source": "https://www.mibo.co.nz/where-to-find-us",
+    "branches": [
+      {
+        "id": "venue-mibo-mount-eden",
+        "branch": "Mount Eden",
+        "address": "G11/30 Enfield Street, Mount Eden, Auckland",
+        "lat": -36.869183,
+        "lng": 174.7631868
+      },
+      {
+        "id": "venue-mibo-wynyard-quarter",
+        "branch": "Wynyard Quarter",
+        "address": "G05/155 Beaumont Street, Wynyard Quarter, Auckland",
+        "lat": -36.8416725,
+        "lng": 174.7545274
+      },
+      {
+        "id": "osm-n5504644689",
+        "branch": "Milford",
+        "address": "87 Kitchener Road, Milford, Auckland",
+        "lat": -36.7730593,
+        "lng": 174.7670392
+      }
+    ]
+  }
+]

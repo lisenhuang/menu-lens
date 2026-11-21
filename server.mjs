@@ -84,17 +84,36 @@ function readForRun(id,pages,requestIp) {
 }
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
 const placesData = environment.R2_MAP_KEY ? await getObject(environment.R2_MAP_KEY) : placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
-const nzPlaces = placesData ? JSON.parse(placesData).places.map(place=>({
-  ...place, search:normalize(place.name+' '+place.address), nameKey:normalize(place.name),
-})) : [];
+const directories=JSON.parse((await siteFile('restaurant-branches.json')).toString());
+const officialBranches=directories.flatMap(({name,aliases=[],source,branches})=>branches.map(branch=>({
+  ...branch,name,aliases,fullAddress:true,attributions:[{provider:name+' locations',providerUri:source}],
+})));
+const directoryIds=new Set(officialBranches.map(place=>place.id));
+const osmPlaces=placesData ? JSON.parse(placesData).places.filter(place=>!directoryIds.has(place.id)) : [];
+const searchText=value=>normalize(value.normalize('NFKD').replace(/\p{M}/gu,'')).replace(/\bmt\b/g,'mount');
+const nzPlaces=[...officialBranches,...osmPlaces].map(({aliases=[],...place})=>({
+  ...place,search:searchText([place.name,...aliases,place.branch,place.address].filter(Boolean).join(' ')),nameKey:searchText(place.name),
+}));
 function localPlaces(query) {
-  const search = normalize(query);
+  const search = searchText(query);
   if (!search) return [];
   const terms = search.split(' ');
   const score = place=>place.nameKey===search ? 0 : place.nameKey.startsWith(search) ? 1 : place.nameKey.includes(search) ? 2 : 3;
   return nzPlaces.filter(place=>terms.every(term=>place.search.includes(term)))
     .sort((a,b)=>score(a)-score(b) || Number(b.fullAddress)-Number(a.fullAddress) || a.name.localeCompare(b.name))
-    .slice(0,10).map(({search,nameKey,...place})=>place);
+    .slice(0,20).map(({search,nameKey,...place})=>place);
+}
+// A provider may return only one outlet for a brand. Supplement it with branches
+// from the business's directory, matching the physical location before merging.
+function supplementBranches(places,branches) {
+  const results=[...places];
+  for (const branch of branches) {
+    const match=places.find(place=>Math.abs(place.lat-branch.lat)<0.0005 &&
+      Math.abs(place.lng-branch.lng)<0.0005 && (' '+searchText(place.name)+' ').includes(' '+searchText(branch.name)+' '));
+    if (match) match.branch=branch.branch;
+    else results.push(branch);
+  }
+  return results;
 }
 const escape = value => String(value).replace(/[&<>"']/g, character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[character]);
 function clean(value, limit, label) {
@@ -623,15 +642,16 @@ async function api(req,res,path) {
     const body = await json(req,2500);
     const query = clean(body.query,220,'Restaurant search');
     if (query.length < 2) throw new RequestError(400,'Type a restaurant name to search.');
+    const local=localPlaces(query);
     if (environment.GOOGLE_PLACES_API_KEY) {
       try {
-        const result = await googlePlaces(query,null);
-        if (result.places.length || !nzPlaces.length) return write(res,200,{...result,source:'google'});
+        const {places}=await googlePlaces(query);
+        if (places.length) return write(res,200,{places:supplementBranches(places,local.filter(place=>directoryIds.has(place.id))),source:'google'});
       } catch (error) {
         if (!nzPlaces.length) throw error;
       }
     }
-    return write(res,200,{places:localPlaces(query),source:'osm'});
+    return write(res,200,{places:local,source:local.some(place=>!directoryIds.has(place.id))?'osm':'directory'});
   }
   if (!['/api/verify','/api/read','/api/publish','/api/retry'].includes(path)) throw new RequestError(404,'This page could not be found.');
   if (!ready) throw new RequestError(503,statusText);
