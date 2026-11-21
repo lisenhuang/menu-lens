@@ -8,7 +8,7 @@ if [[ -n "${MENU_ORACLE_IDENTITY:-}" ]]; then
   ssh_args+=(-i "$MENU_ORACLE_IDENTITY")
 fi
 
-COPYFILE_DISABLE=1 tar -C "$root" -czf - Dockerfile .dockerignore public server.mjs providers.mjs |
+COPYFILE_DISABLE=1 tar -C "$root" -czf - Dockerfile .dockerignore public server.mjs providers.mjs admin.mjs |
   ssh "${ssh_args[@]}" "$target" '
 set -euo pipefail
 umask 027

@@ -1,0 +1,32 @@
+import {scrypt,timingSafeEqual} from 'node:crypto';
+import {promisify} from 'node:util';
+import {RequestError} from './providers.mjs';
+
+const derive = promisify(scrypt);
+export async function matchesPin(pin, verifier) {
+  const match = /^([a-f0-9]{32}):([a-f0-9]{64})$/.exec(verifier || '');
+  if (!match) throw new RequestError(503,'Admin sign-in is unavailable.');
+  if (typeof pin!=='string' || !/^\d{6}$/.test(pin)) return false;
+  const key = await derive(pin,Buffer.from(match[1],'hex'),32,{N:32768,r:8,p:1,maxmem:64*1024*1024});
+  return timingSafeEqual(key,Buffer.from(match[2],'hex'));
+}
+
+// OpenAI's 1024 × 1024 standard Images API calculator, checked 2026-11-21.
+// https://developers.openai.com/api/docs/guides/image-generation#calculating-costs
+const outputTokens26={low:823,medium:1449,high:1756,xhigh:3122,max:7024};
+const outputTokens25={low:196,medium:439,high:1756,xhigh:3122,max:7024};
+export const imageModels={
+  'gpt-image-2.6-flare':outputTokens26,
+  'gpt-image-2.6-sunburst':outputTokens26,
+  'gpt-image-2.5-flare':outputTokens25,
+  'gpt-image-2.5-sunburst':outputTokens25,
+  'gpt-image-2':{low:196,medium:1756,high:7024},
+};
+export const outputUsdPerMillion=30;
+export const readingEfforts=['minimal','low','medium','high'];
+export function validateSettings({model,quality,reasoning}) {
+  if (typeof model!=='string' || typeof quality!=='string' || !Object.hasOwn(imageModels,model) || !Object.hasOwn(imageModels[model],quality) || !readingEfforts.includes(reasoning)) {
+    throw new RequestError(400,'Choose a supported model, image quality and menu-reading effort.');
+  }
+  return {model,quality,reasoning};
+}

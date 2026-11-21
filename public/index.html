@@ -14,8 +14,8 @@
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/theme.js"></script>
-  <link rel="stylesheet" href="/style.css">
-  <script type="module" src="/app.js"></script>
+  <link rel="stylesheet" href="/style.css?v=4">
+  <script type="module" src="/app.js?v=4"></script>
 </head>
 <body>
   <a href="#main" class="skip">Skip to content</a>
@@ -28,12 +28,12 @@
       </nav>
       <div class="header-actions">
         <details class="theme">
-          <summary aria-label="Change theme" title="Change theme"><span data-icon="monitor"></span><span class="theme-caret" data-icon="chevron"></span></summary>
+          <summary aria-label="Change theme" title="Change theme"><span data-icon="sunMoon"></span></summary>
           <fieldset class="theme-options">
             <legend class="sr-only">Appearance</legend>
-            <label><input type="radio" name="theme" value="system" aria-label="System"><span data-icon="monitor"></span>System</label>
-            <label><input type="radio" name="theme" value="light" aria-label="Light"><span data-icon="sun"></span>Light</label>
-            <label><input type="radio" name="theme" value="dark" aria-label="Dark"><span data-icon="moon"></span>Dark</label>
+            <label><input type="radio" name="theme" value="system" aria-label="System"><span data-icon="sunMoon"></span>System<span data-icon="check"></span></label>
+            <label><input type="radio" name="theme" value="light" aria-label="Light"><span data-icon="sun"></span>Light<span data-icon="check"></span></label>
+            <label><input type="radio" name="theme" value="dark" aria-label="Dark"><span data-icon="moon"></span>Dark<span data-icon="check"></span></label>
           </fieldset>
         </details>
         <a class="btn small primary header-create" href="/create"><span data-icon="plus"></span> Create menu</a>

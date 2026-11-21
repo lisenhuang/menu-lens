@@ -1,4 +1,4 @@
-import {icons} from './icons.js';
+import {icons} from './icons.js?v=3';
 
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#modal');
@@ -16,8 +16,12 @@ enhance(document);
 
 function syncTheme() {
   const value = document.documentElement.dataset.theme || 'system';
-  theme.querySelector(`[value="${value}"]`).checked = true;
-  theme.querySelector('summary > span:first-child').outerHTML = icon({system:'monitor',dark:'moon',light:'sun'}[value]);
+  const option = theme.querySelector(`[value="${value}"]`);
+  option.checked = true;
+  const trigger = theme.querySelector('summary');
+  trigger.innerHTML = icon({system:'sunMoon',light:'sun',dark:'moon'}[value]);
+  trigger.title = 'Change theme (currently '+option.getAttribute('aria-label')+')';
+  trigger.setAttribute('aria-label',trigger.title);
 }
 theme.addEventListener('change',event=>{
   const value = event.target.value;
@@ -25,8 +29,15 @@ theme.addEventListener('change',event=>{
   else document.documentElement.dataset.theme = value;
   try { localStorage.setItem('menu-lens-theme',value); } catch {}
   syncTheme();
-  theme.open = false;
-  theme.querySelector('summary').focus();
+});
+theme.addEventListener('click',event=>{
+  if (event.target.matches('input') && event.detail>0) {
+    theme.open = false;
+    theme.querySelector('summary').focus();
+  }
+});
+theme.addEventListener('focusout',event=>{
+  if (event.relatedTarget && !theme.contains(event.relatedTarget)) theme.open=false;
 });
 document.addEventListener('click',event=>{if (!theme.contains(event.target)) theme.open=false;});
 theme.addEventListener('keydown',event=>{
@@ -831,6 +842,7 @@ async function openSubmission(id) {
 
 const route = location.pathname.replace(/\/$/,'') || '/';
 if (route==='/') void home();
+else if (route==='/admin') void import('./admin.js?v=1').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();

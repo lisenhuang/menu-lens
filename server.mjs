@@ -6,6 +6,8 @@ import {dirname, extname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {generateDish, googlePlaces, readMenu, RequestError, verifyPerson} from './providers.mjs';
 
+import {imageModels, matchesPin, outputUsdPerMillion, readingEfforts, validateSettings} from './admin.mjs';
+
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
 const document = readFileSync(join(publicDir,'index.html'),'utf8');
@@ -21,6 +23,8 @@ const db = new DatabaseSync(join(dataDir,'menu.sqlite'));
 db.exec(`
   PRAGMA journal_mode=WAL;
   PRAGMA foreign_keys=ON;
+  CREATE TABLE IF NOT EXISTS admin_sessions (id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS generation_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, expires INTEGER NOT NULL, details TEXT NOT NULL, reads INTEGER NOT NULL DEFAULT 0, read_success INTEGER NOT NULL DEFAULT 0);
   CREATE TABLE IF NOT EXISTS counters (id TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS menus (
@@ -50,6 +54,11 @@ const statusText = 'Menu submissions are temporarily unavailable. Please try aga
 const publicId = /^[a-f0-9]{20}$/;
 const sha = value => createHash('sha256').update(value).digest('hex');
 const normalize = value => value.normalize('NFKC').toLocaleLowerCase('en-NZ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+function settings() {
+  const row = db.prepare('SELECT value FROM generation_settings WHERE id=1').get();
+  return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium',reasoning:'minimal'};
+}
+
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
 const placesData = placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
 const nzPlaces = placesData ? JSON.parse(placesData).places.map(place=>({
@@ -205,7 +214,7 @@ async function readDrafts() {
       WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
       db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
       try {
-        const output = await readMenu(JSON.parse(draft.pages));
+        const output = await readMenu(JSON.parse(draft.pages),settings().reasoning);
         if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
         db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
       } catch (error) {
@@ -229,14 +238,15 @@ async function runQueue() {
     let row;
     while ((row=db.prepare("SELECT * FROM menus WHERE state='queued' ORDER BY created LIMIT 1").get())) {
       db.prepare("UPDATE menus SET state='running' WHERE id=?").run(row.id);
-      const {dishes} = JSON.parse(row.payload);
+      const {dishes,imageSettings} = JSON.parse(row.payload);
+      const imageConfig = imageSettings || {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium'};
       const done = new Set(db.prepare('SELECT position FROM dish_images WHERE menu_id=?').all(row.id).map(item=>item.position));
       const remaining = dishes.map((dish,i)=>({dish,i})).filter(item=>!done.has(item.i));
       try {
         for (let i=0;i<remaining.length;i+=2) {
           const results = await Promise.allSettled(remaining.slice(i,i+2).map(async item=>{
             if (!rate('images:daily',dayLimit,86_400_000)) throw new RequestError(429,'Daily image capacity reached.');
-            const bytes = await generateDish(item.dish);
+            const bytes = await generateDish(item.dish,imageConfig);
             db.prepare('INSERT INTO dish_images VALUES (?,?,?)').run(row.id,item.i,bytes);
           }));
           if (results.some(result=>result.status==='rejected')) throw new Error('Image batch unfinished');
@@ -256,6 +266,7 @@ function queue() {
 queue();
 setInterval(()=>{
   const now = Date.now();
+  db.prepare('DELETE FROM admin_sessions WHERE expires<=?').run(now);
   db.prepare('DELETE FROM counters WHERE expires<=?').run(now);
   db.prepare('DELETE FROM sessions WHERE expires<=?').run(now);
   const cutoff = new Date(now-604_800_000).toISOString();
@@ -284,7 +295,8 @@ async function publish(req,res,id,owner,fromDraft) {
   const body = await json(req);
   if (body.reviewed !== true) throw new RequestError(403,'Review the original menu information before publishing.');
   const {date,restaurant,consentAt} = JSON.parse(owner.details);
-  const payload = {...menuText(body),restaurant,consentAt};
+  const {model,quality} = settings();
+  const payload = {...menuText(body),restaurant,consentAt,imageSettings:{model,quality}};
   const duplicate = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
   if (duplicate) return write(res,202,duplicate);
   if (fromDraft ? privateDraft(id,owner.id).state!=='review' : !owner.read_success) {
@@ -355,8 +367,43 @@ async function jobApi(req,res,id,action) {
   throw new RequestError(404,'This page could not be found.');
 }
 
+async function adminApi(req,res,path) {
+  const verifier = environment.ADMIN_PIN_VERIFIER;
+  if (!verifier) throw new RequestError(503,'Admin sign-in is unavailable.');
+  const cookieSuffix = '; Path=/api/admin; HttpOnly; SameSite=Strict'+(liveOrigin.startsWith('https:') ? '; Secure' : '');
+  if (path==='/api/admin/login' && req.method==='POST') {
+    limit(req,'admin-login',10,900);
+    const {pin,token} = await json(req,4096);
+    await verifyPerson(token,clientIp(req),'admin_login');
+    if (!rate('admin-pin-attempts',30,900_000)) throw new RequestError(429,'Too many sign-in attempts. Try again in 15 minutes.');
+    if (!await matchesPin(pin,verifier)) throw new RequestError(401,'Sign-in failed. Check your PIN and try again.');
+    const sessionToken = randomBytes(32).toString('hex');
+    db.prepare('INSERT INTO admin_sessions (id,expires) VALUES (?,?)').run(sha(verifier+sessionToken),Date.now()+4*3_600_000);
+    return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_admin=${sessionToken}${cookieSuffix}; Max-Age=14400`});
+  }
+  const token=req.headers.cookie?.match(/(?:^|;\s*)ml_admin=([a-f0-9]{64})(?:;|$)/)?.[1];
+  const id=token && sha(verifier+token);
+  if (!id || !db.prepare('SELECT 1 FROM admin_sessions WHERE id=? AND expires>?').get(id,Date.now())) {
+    throw new RequestError(401,'Sign in to manage generation settings.');
+  }
+  if (path==='/api/admin/logout' && req.method==='POST') {
+    db.prepare('DELETE FROM admin_sessions WHERE id=?').run(id);
+    return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_admin=${cookieSuffix}; Max-Age=0`});
+  }
+  if (path==='/api/admin/settings' && req.method==='GET') {
+    return write(res,200,{settings:settings(),imageModels,outputUsdPerMillion,readingEfforts,readingModel:environment.OPENAI_VISION_MODEL || 'gpt-5-mini'});
+  }
+  if (path==='/api/admin/settings' && req.method==='POST') {
+    const next=validateSettings(await json(req,2048));
+    db.prepare('INSERT INTO generation_settings VALUES (1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(JSON.stringify(next));
+    return write(res,200,{settings:next});
+  }
+  throw new RequestError(404,'This page could not be found.');
+}
+
 async function api(req,res,path) {
   const get = req.method === 'GET';
+  if (path.startsWith('/api/admin/')) return adminApi(req,res,path);
   if (path === '/api/config' && get) return write(res,200,{
     siteKey:environment.TURNSTILE_SITE_KEY || '',
     generation:ready, places:Boolean(environment.GOOGLE_PLACES_API_KEY || nzPlaces.length),maxDishes,
@@ -419,7 +466,7 @@ async function api(req,res,path) {
     const body = await json(req,16_000_000);
     validatePages(body);
     reserveRead(owner.id);
-    const output = await readMenu(body.pages);
+    const output = await readMenu(body.pages,settings().reasoning);
     if (!output.isMenu) throw new RequestError(422,'This does not look like a restaurant menu. Upload clear photos of the menu.');
     db.prepare('UPDATE sessions SET read_success=1 WHERE id=?').run(owner.id);
     return write(res,200,output);
@@ -446,6 +493,7 @@ const server = createServer(async (req,res)=>{
       return await api(req,res,path);
     }
     if (req.method!=='GET' && req.method!=='HEAD') throw new RequestError(405,'This request method is unavailable.');
+    if (path==='/admin') return write(res,200,document,mime.html,{'X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'});
     if (path==='/healthz') return write(res,200,{status:'ok'});
     if (path==='/data/nz-restaurants.json' && placesData) {
       return write(res,200,placesData,'application/octet-stream',{

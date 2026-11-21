@@ -2,5 +2,6 @@
 !Dockerfile
 !server.mjs
 !providers.mjs
+!admin.mjs
 !public/
 !public/**
