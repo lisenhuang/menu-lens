@@ -1,11 +1,10 @@
 import {icons} from './icons.js?v=3';
+import {dateLabel, dishMedia, escape, icon, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=1';
 
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#modal');
 const theme = document.querySelector('.theme');
 const $ = (selector,root=document)=>root.querySelector(selector);
-const icon = name=>`<span data-icon="${name}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg></span>`;
-const escape = value=>String(value ?? '').replace(/[&<>"']/g, character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[character]);
 function enhance(root) {
   for (const element of root.querySelectorAll('[data-icon]:empty')) {
     const name = element.dataset.icon;
@@ -48,27 +47,11 @@ theme.addEventListener('keydown',event=>{
 });
 syncTheme();
 
-function dateLabel(date) {
-  return new Intl.DateTimeFormat('en-NZ',{dateStyle:'medium',timeZone:'UTC'}).format(new Date(date+'T00:00:00Z'));
-}
 function localDate() {
   const now = new Date();
   const local = new Date(now.getTime()-now.getTimezoneOffset()*60000);
   return local.toISOString().slice(0,10);
 }
-function pinText(pin) {
-  return Number.isFinite(pin?.lat) && Number.isFinite(pin?.lng) ? pin.lat+', '+pin.lng : '';
-}
-function mapsUrl(name,address='',id='',pin) {
-  const params = new URLSearchParams({api:'1',query:pinText(pin) || [name,address].filter(Boolean).join(', ')});
-  if (id && !/^(osm|venue)-/.test(id)) params.set('query_place_id',id);
-  return 'https://www.google.com/maps/search/?'+params;
-}
-function mapsLink(name,address,id,pin,label='Google Maps') {
-  return `<a class="text-link" href="${escape(mapsUrl(name,address,id,pin))}" target="_blank" rel="noopener noreferrer">${label} ${icon('external')}</a>`;
-}
-const notice = (text,name='info')=>`<p class="notice">${icon(name)}<span>${escape(text)}</span></p>`;
-const pagesBack = (href,label)=>`<a class="breadcrumb" href="${href}">${icon('back')} ${label}</a>`;
 const primary = (label,glyph,options='')=>`<button type="button" class="btn primary" ${options}>${glyph ? icon(glyph) : ''}${label}</button>`;
 
 async function api(path,body) {
@@ -184,16 +167,10 @@ viewer.addEventListener('close',()=>{
   imageOpener?.focus({preventScroll:true});
 });
 
-function dishCard(dish) {
-  return `<article class="dish-card" id="${escape(dish.id)}"><a class="dish-image" href="${escape(dish.image)}" data-view-image aria-haspopup="dialog">
-    <img src="${escape(dish.image)}" alt="AI illustration of ${escape(dish.name)}" width="780" height="500" loading="lazy"></a>
-    <div class="dish-body"><h3>${escape(dish.name)}</h3>${dish.price ? `<span class="price">${escape(dish.price)}</span>` : ''}
-    ${dish.description ? `<p class="description">${escape(dish.description)}</p>` : ''}</div></article>`;
-}
 function listing(menu) {
   return `<article class="dish-card menu-card"><a class="dish-image" href="${escape(menu.cover)}" data-view-image aria-haspopup="dialog"><img src="${escape(menu.cover)}" alt="Cover photo for ${escape(menu.restaurant.name)}" width="780" height="500" loading="lazy"></a>
   <a class="dish-body" href="/menu/${escape(menu.id)}"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
-    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}</p></div></a></article>`;
+    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p></div></a></article>`;
 }
 async function home() {
   try {
@@ -234,43 +211,73 @@ async function explore() {
   }
 }
 
-async function showMenu(id) {
-  let menu;
-  page('Loading menu','VISUAL MENU','',notice('Fetching the published menu.'),pagesBack('/explore','Explore menus'));
-  try { menu = await api('/menus/'+encodeURIComponent(id)); }
-  catch(error) {
-    return page(error.status===404 ? 'Menu not found' : 'Menu unavailable','VISUAL MENU',
-      'Check the link or choose another menu in the collection.','',pagesBack('/explore','Explore menus'));
+function filterDishes() {
+  const onlyReady=$('#ready-filter')?.checked;
+  for (const section of main.querySelectorAll('.menu-section')) {
+    let visible=0;
+    for (const card of section.querySelectorAll('[data-position]')) {
+      card.hidden=Boolean(onlyReady && card.querySelector('.dish-pending'));
+      if (!card.hidden) visible++;
+    }
+    section.hidden=visible===0;
+    const link=main.querySelector(`.menu-jumps a[href="#${section.id}"]`);
+    if (link) link.hidden=section.hidden;
   }
-  document.title = menu.restaurant.name+' · Menu Lens';
-  const sections = [...new Set(menu.dishes.map(dish=>dish.section))];
-  const dates = (menu.versions || []).map(version=>`<li><a class="text-link" href="/menu/${escape(version.id)}">${dateLabel(version.date)}</a>${version.created ? ` <span class="muted">· Published ${dateLabel(version.created.slice(0,10))}</span>` : ''}</li>`).join('');
-  main.innerHTML = `<div class="page">
-    ${pagesBack('/explore','Explore menus')}
-    <section class="menu-cover"><div class="menu-cover-copy"><p class="eyebrow page-kicker">COMMUNITY VISUAL MENU</p>
-    <h1 class="page-title">${escape(menu.restaurant.name)}</h1>
-    <p class="page-intro">${escape(menu.restaurant.address)}</p>
-    ${menu.restaurant.placeId?.startsWith('osm-') ? '<a class="field-hint" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>' : ''}
-    <p class="hero-note">${icon('calendar')} Photographed ${dateLabel(menu.date)}</p>
-    <div class="inline-actions"><button type="button" class="btn primary" id="share">${icon('link')} Copy link</button>
-    ${mapsLink(menu.restaurant.name,menu.restaurant.address,menu.restaurant.placeId,menu.restaurant.pin)}
-    </div></div><a href="${escape(menu.cover)}" data-view-image aria-haspopup="dialog"><img src="${escape(menu.cover)}" alt="AI illustration of ${escape(menu.dishes[0].name)}" width="780" height="500"></a></section>
-    ${notice('Dish images are AI illustrations. Confirm current prices, availability and allergens with the restaurant.','sparkles')}
-    ${sections.length>1 ? `<nav aria-label="Menu sections" class="menu-jumps">${sections.map((section,i)=>`<a href="#section-${i}">${escape(section || 'Menu')}</a>`).join('')}</nav>` : ''}
-    ${sections.map((section,i)=>`<section class="menu-section" id="section-${i}"><h2>${escape(section || 'Menu')}</h2><div class="dish-grid">${menu.dishes.filter(dish=>dish.section===section).map(dishCard).join('')}</div></section>`).join('')}
-    ${menu.notes ? `<div class="panel menu-details"><h3>Notes from the menu</h3><p>${escape(menu.notes)}</p></div>` : ''}
-    ${menu.originals?.length ? `<details class="panel menu-details" id="original-menu"><summary>Original menu <small>· ${menu.originals.length} ${menu.originals.length===1?'page':'pages'}</small></summary><div class="original-pages"></div></details>` : ''}
-    ${dates ? `<div class="panel menu-details"><h3>Other menus for this restaurant</h3><ul>${dates}</ul></div>` : ''}
-    <a href="/create" class="btn quiet">${icon('plus')} Add a newer menu</a>
-    </div>`;
+}
+function bindMenu(id) {
+  const title=$('.menu-cover h1').textContent;
+  document.title=title+' · Menu Lens';
+  $('#share').onclick=()=>share();
+  const filter=$('#ready-filter');
+  if (filter) filter.onchange=filterDishes;
   const originals=$('#original-menu');
   originals?.addEventListener('toggle',()=>{
-    if (!originals.open || originals.querySelector('img')) return;
-    $('.original-pages',originals).innerHTML=menu.originals.map((url,i)=>
-      `<a href="${escape(url)}" data-view-image aria-haspopup="dialog"><img src="${escape(url)}" loading="lazy" alt="Original menu page ${i+1} from ${escape(menu.restaurant.name)}"><span>View page ${i+1} full screen</span></a>`).join('');
+    if (originals.hidden || !originals.open || originals.querySelector('img')) return;
+    $('.original-pages',originals).innerHTML=Array.from({length:Number(originals.dataset.count)},(_,i)=>{
+      const url=`/originals/${id}/${i}.jpg`;
+      return `<a href="${url}" data-view-image aria-haspopup="dialog"><img src="${url}" loading="lazy" alt="Original menu page ${i+1} from ${escape(title)}"><span>View page ${i+1} full screen</span></a>`;
+    }).join('');
   });
-  $('#share').addEventListener('click',()=>share());
+  const retry=$('#live-retry');
+  if (retry) retry.onclick=async()=>{
+    retry.disabled=true;
+    try {await api('/jobs/'+id+'/retry',{});}
+    catch(error) {errorAt($('#live-message'),error.message);}
+    finally {retry.disabled=false;}
+  };
   if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView();
+}
+function updateMenuPhotos(job) {
+  const menu=$('#visual-menu');
+  if (!menu || !$('#live-meter')) return;
+  menu.dataset.state=job.state;
+  const ready=new Set(job.readyPositions),active=new Set(job.activePositions);
+  for (const placeholder of menu.querySelectorAll('.dish-pending')) {
+    const card=placeholder.closest('[data-position]'),i=Number(card.dataset.position);
+    if (ready.has(i)) {
+      placeholder.outerHTML=dishMedia({name:$('h3',card).textContent,image:`/media/${job.id}/${i}.webp`});
+    } else {
+      const stage=active.has(i)?'active':'waiting';
+      if (stage!==placeholder.dataset.stage) {
+        placeholder.dataset.stage=stage;
+        placeholder.lastElementChild.textContent=active.has(i)?'Illustrating':'Awaiting photo';
+      }
+    }
+  }
+  for (const [selector,text] of [['#live-title',progressText(job)],['#live-count',`${job.completed} of ${job.total} photos ready`],['#live-active',`${active.size} generating`]]) {
+    const el=$(selector);
+    if (el.textContent!==text) el.textContent=text;
+  }
+  $('#live-meter').value=job.completed;
+  $('#live-retry').hidden=!job.canRetry;
+  $('#live-message').hidden=true;
+  if (job.state==='complete') {
+    if ($('#original-menu')) $('#original-menu').hidden=false;
+    $('.ready-filter').hidden=true;
+    $('.live-separator').hidden=true;
+    $('#live-active').hidden=true;
+  }
+  filterDishes();
 }
 
 function privacy() {
@@ -279,7 +286,7 @@ function privacy() {
     `<div class="panel privacy">
       <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, transcribed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Remove private details from the photos before uploading.</p>
-      <p>OpenAI reads your menu photos. Photos stay private while the menu is being prepared. If reading fails, you can retry from the same browser within 24 hours of uploading. Once the menu is published, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
+      <p>OpenAI reads your menu photos. Photos stay private while the menu is being prepared. If reading fails, you can retry from the same browser within 24 hours of uploading. The menu and its illustrations become public with the first dish photo. The original pages become public in the Original menu section once all illustrations are ready. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
       <p>Save the menu link to return to your draft. A cookie lets you open it in the browser you used to upload.</p>
       <p>Menu Lens stores the requesting IP address and its approximate city, when supplied by Cloudflare, alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
@@ -456,7 +463,7 @@ function locationStep() {
       </details>
       <label class="field">Date photographed<input class="control" type="date" id="menu-date" min="1900-01-01" max="${localDate()}" required value="${escape(state.date)}"></label>
       <div id="distance"></div>
-      <p>By choosing <strong>Generate &amp; publish</strong>, you agree to make the restaurant details, dish prices and your original menu photos public. Only upload photos you have permission to share.</p>
+      <p>By choosing <strong>Generate &amp; publish</strong>, you agree to make the restaurant details, dish prices and your original menu photos public. Your menu is public as soon as the first dish photo is ready. The original pages appear when all illustrations are ready. Only upload photos you have permission to share.</p>
       <div id="challenge" aria-label="Human verification"></div>
       ${progressFeedback('transfer-progress')}<p class="error" id="step-error" role="alert" hidden></p>
       <div class="form-actions"><button type="button" class="btn text back" id="back">${icon('back')} Photos</button>
@@ -729,7 +736,7 @@ function watchJob(id,onStatus,onError) {
   }
   async function accept(job,rev) {
     if (rev!==revision || finished) return;
-    const active=liveStates.has(job.state);
+    const active=liveStates.has(job.state) || (job.state==='error' && job.completed>0);
     if (!active) {source?.close();source=null;}
     const signature=JSON.stringify(job);
     if (last!==signature) {
@@ -741,10 +748,9 @@ function watchJob(id,onStatus,onError) {
     if (source) return;
     if (!window.EventSource) {timer=setTimeout(refresh,3500);return;}
     source=new EventSource('/api'+path+'/events');
+    let delivery=Promise.resolve();
     source.onmessage=event=>{
-      if (rev!==revision) return;
-      try {void accept(JSON.parse(event.data),rev).catch(error=>failure(error,rev));}
-      catch(error) {failure(error,rev);}
+      delivery=delivery.then(()=>accept(JSON.parse(event.data),rev)).catch(error=>failure(error,rev));
     };
     source.onerror=()=>failure(new Error('Live connection interrupted.'),rev);
   }
@@ -766,10 +772,22 @@ function watchJob(id,onStatus,onError) {
 async function openSubmission(id) {
   const path='/jobs/'+id;
   const back=pagesBack('/explore','Explore menus');
-  document.title='Menu progress · Menu Lens';
-  if (!$('#job-opening')) page('Opening your menu','MENU LENS','','',back);
+  if ($('#visual-menu')) {
+    bindMenu(id);
+    if ($('#visual-menu').dataset.state==='complete') return;
+  } else {
+    document.title='Menu progress · Menu Lens';
+    if (!$('#job-opening')) page('Opening your menu','MENU LENS','','',back);
+  }
   watchJob(id,async job=>{
-    if (job.state==='complete') return showMenu(id);
+    if (job.completed>0 || job.state==='complete') {
+      if (!$('#visual-menu')) {
+        main.innerHTML=renderMenu(await api('/menus/'+id));
+        bindMenu(id);
+      }
+      updateMenuPhotos(job);
+      return;
+    }
     const images=Number.isInteger(job.total);
     const active=liveStates.has(job.state);
     const publishing=job.state==='running' && job.completed===job.total;
@@ -841,6 +859,8 @@ async function openSubmission(id) {
     if (error.status===404 || error.status===403) {
       page('Menu unavailable','MENU LENS','Open private drafts in the browser you used to upload. Drafts expire after 24 hours.',
         '<a href="/explore" class="btn quiet">Explore published menus</a>',back);
+    } else if ($('#live-message')) {
+      errorAt($('#live-message'),'Reconnecting to photo updates…');
     } else if ($('#job-error')) {
       errorAt($('#job-error'),'Connection interrupted. Reconnecting…');
     } else {
@@ -858,11 +878,11 @@ try {
 
 const route = location.pathname.replace(/\/$/,'') || '/';
 if (route==='/') void home();
-else if (route==='/admin') void import('./admin.js?v=4').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
+else if (route==='/admin') void import('./admin.js?v=5').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();
 else if (route.startsWith('/menu/')) {
   void openSubmission(route.split('/')[2]);
-  window.addEventListener('pageshow',event=>{if (event.persisted) location.reload();});
+
 }

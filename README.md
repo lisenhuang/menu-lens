@@ -6,11 +6,11 @@ Turn a photo of a restaurant menu into a public, dated menu with an AI illustrat
 
 **Upload photos → choose the restaurant → generate and publish**
 
-After uploading, copy the menu link before closing the tab. Open it in the same browser within 24 hours to follow progress or retry a failed read using the saved photos. Each read has up to five minutes. Menus with a photo for every dish stop after reading. Finished menus appear at the same link with the original photos in a collapsed section.
+After uploading, copy the menu link before closing the tab. Open it in the same browser within 24 hours to follow progress or retry a failed read using the saved photos. Each read has up to five minutes. Menus with a photo for every dish stop after reading. The first ready illustration opens the public menu at the same link. New photos appear live. The original pages stay folded and become available when all illustrations are ready.
 
-| Choose a theme | Browse a published menu |
-| :---: | :---: |
-| <img src="docs/screenshots/appearance.jpg" width="300" alt="Mobile theme picker with System selected and Light and Dark available"> | <img src="docs/screenshots/published-menu.jpg" width="300" alt="Published menu on a phone showing illustrated dishes and printed prices"> |
+| Choose a theme | Watch photos arrive | Browse a published menu |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/appearance.jpg" width="300" alt="Mobile theme picker with System selected and Light and Dark available"> | <img src="docs/screenshots/live-menu.jpg" width="300" alt="Mobile menu showing three of six photos ready and one generating"> | <img src="docs/screenshots/published-menu.jpg" width="300" alt="Published menu on a phone showing illustrated dishes and printed prices"> |
 
 ## Menu generation pipeline
 
@@ -21,14 +21,15 @@ flowchart TD
     B -->|"Unreadable or unrelated"| R["Keep photos private for retry"]
     C -->|Yes| S["Stop and discard the uploaded photos"]
     C -->|No| D["Generate one illustration per dish"]
-    D --> E["Publish at the original menu link"]
+    D --> E["First photo opens the public menu"]
+    E --> F["Stream each new photo into the menu"]
 ```
 
 1. **Submit.** The diner selects one to six photos, chooses the restaurant and date, then selects **Generate & publish**. The browser converts the pages to JPEGs. After Cloudflare Turnstile verifies the submission, the server saves the photos in R2 and queues the job in SQLite. Once the upload finishes, the diner can close the tab.
 2. **Transcribe.** The server sends all pages together to OpenAI’s Responses API. It requests structured JSON containing the menu text, notes, warnings and dishes in printed order. Each dish has a section, name, description, price and `hasDishPhoto` flag. If reading fails, the uploader can retry from the same browser within 24 hours, up to three reading attempts in total.
 3. **Check photo coverage.** If every dish has a matching photo, processing stops and the uploaded pages are discarded. If even one dish lacks a matching photo, every dish on the menu gets an AI illustration, including dishes that already have photos.
 4. **Illustrate.** Each image request uses the dish name and description. The worker processes up to two dishes at a time and saves each 1024 × 1024 WebP to R2. If generation stops partway through, a retry resumes with the missing images.
-5. **Publish.** Once all illustrations are saved, the menu appears in the public collection at the same link used to track progress. The published page includes the transcribed dishes, printed prices and original menu photos.
+5. **Publish.** The first saved illustration puts the menu in the public collection with dish names and printed prices. The server renders the current menu and streams each new photo into its dish card. Original menu pages become public after the last illustration finishes.
 
 ## Worked example: French toast at MIBO
 

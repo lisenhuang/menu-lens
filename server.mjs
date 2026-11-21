@@ -1,3 +1,4 @@
+import {renderMenu} from './public/menu-view.js';
 import {setTimeout as delay} from 'node:timers/promises';
 import {getObject,putObject,deleteObject,dishKey,objectSchema,objectExists} from './storage.mjs';
 import {createServer} from 'node:http';
@@ -29,6 +30,9 @@ db.exec(`
   PRAGMA journal_mode=WAL;
   PRAGMA foreign_keys=ON;
   CREATE TABLE IF NOT EXISTS admin_sessions (id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS billing_snapshot (
+    id INTEGER PRIMARY KEY CHECK(id=1), cents INTEGER NOT NULL, organization TEXT NOT NULL, checked TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS generation_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, expires INTEGER NOT NULL, details TEXT NOT NULL, reads INTEGER NOT NULL DEFAULT 0, read_success INTEGER NOT NULL DEFAULT 0);
   CREATE TABLE IF NOT EXISTS counters (id TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
@@ -200,11 +204,16 @@ function privateDraft(id, owner) {
   if (!draft) throw new RequestError(404,'This submission is unavailable. Open it in the browser you used to upload.');
   return draft;
 }
-function jobStatus(row, owner) {
-  const payload = JSON.parse(row.payload);
-  const completed = db.prepare('SELECT count(*) AS count FROM dish_objects WHERE menu_id=?').get(row.id).count;
-  const illustrating=row.state==='running' ? db.prepare("SELECT label FROM generation_calls WHERE run_id=? AND kind='image' AND state='running' ORDER BY seq").all(row.id).map(call=>call.label) : [];
-  return {id:row.id,name:payload.restaurant.name,state:row.state,completed,illustrating,total:payload.dishes.length,
+const activeDishes=new Map();
+function savedPositions(id) {
+  return db.prepare('SELECT position FROM dish_objects WHERE menu_id=? ORDER BY position').all(id).map(row=>row.position);
+}
+function jobStatus(row,owner) {
+  const {restaurant,dishes}=JSON.parse(row.payload);
+  const readyPositions=savedPositions(row.id);
+  const activePositions=[...(activeDishes.get(row.id) || [])];
+  return {id:row.id,name:restaurant.name,state:row.state,completed:readyPositions.length,total:dishes.length,
+    readyPositions,activePositions,illustrating:activePositions.map(i=>dishes[i].name),
     canRetry:row.state==='error' && row.owner===owner && row.attempts<3};
 }
 
@@ -240,7 +249,7 @@ function streamProgress(res,id,owner) {
         last=data;
         if (!res.write('data: '+data+'\n\n')) {res.end();return;}
       }
-      if (!activeStates.has(status.state)) res.end();
+      if (!activeStates.has(status.state) && !(status.state==='error' && status.completed>0)) res.end();
     } catch {res.end();}
   }
   // The heartbeat keeps proxies open and rechecks draft expiry during long reads.
@@ -309,22 +318,28 @@ function menuText(body) {
   return {dishes,notes:clean(body.notes,9000,'Menu notes'),transcript:clean(body.transcript,65000,'Original information')};
 }
 
-function card(row) {
-  const {restaurant,dishes} = JSON.parse(row.payload);
-  return {id:row.id,restaurant,date:row.date,published:row.created,cover:`/media/${row.id}/0.webp`,count:dishes.length};
+function card(row,first=row.firstPhoto ?? 0) {
+  const {restaurant,dishes}=JSON.parse(row.payload);
+  return {id:row.id,restaurant,date:row.date,published:row.created,cover:`/media/${row.id}/${first}.webp`,
+    state:row.state,count:dishes.length,completed:row.completed ?? dishes.length};
 }
-
 function publicMenu(row) {
-  const payload = JSON.parse(row.payload);
-  const {dishes,restaurant,notes,originals=[]} = payload;
-  const versions = db.prepare(`
+  if (!row) return null;
+  const status=jobStatus(row);
+  if (row.state!=='complete' && !status.completed) return null;
+  const {dishes,restaurant,notes,originals=[]}=JSON.parse(row.payload);
+  const versions=db.prepare(`
     SELECT id,date,created FROM menus WHERE state='complete' AND id<>?
       AND (restaurant_key=? OR json_extract(payload,'$.restaurant.addressKey')=?)
     ORDER BY date DESC,created DESC LIMIT 30
   `).all(row.id,restaurant.key,restaurant.addressKey);
+  const saved=new Set(status.readyPositions);
   return {
-    ...card(row),notes,versions,originals:originals.map((_,i)=>`/originals/${row.id}/${i}.jpg`),
-    dishes:dishes.map((dish,i)=>({...dish,image:`/media/${row.id}/${i}.webp`})),
+    ...card(row,status.readyPositions[0]),completed:status.completed,activePositions:status.activePositions,
+    notes,versions,originalCount:originals.length,
+    originals:row.state==='complete' ? originals.map((_,i)=>`/originals/${row.id}/${i}.jpg`) : [],
+    dishes:dishes.map((dish,i)=>({...dish,position:i,active:status.activePositions.includes(i),
+      image:saved.has(i) ? `/media/${row.id}/${i}.webp` : null})),
   };
 }
 
@@ -401,20 +416,27 @@ async function runQueue() {
       const imageConfig = imageSettings || {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium'};
       const done = new Set(db.prepare('SELECT position FROM dish_objects WHERE menu_id=?').all(row.id).map(item=>item.position));
       const remaining = dishes.map((dish,i)=>({dish,i})).filter(item=>!done.has(item.i));
+      const active=new Set();
+      activeDishes.set(row.id,active);
       try {
         for (let i=0;i<remaining.length;i+=2) {
           const results = await Promise.allSettled(remaining.slice(i,i+2).map(async item=>{
-            const key=dishKey(row.id,item.i);
-            // A restart can land between a successful R2 write and its SQLite checkpoint.
-            if (!await objectExists(key)) {
-              const bytes=await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,received=>{
-                notifyProgress(row.id);
-                return generateDish(item.dish,imageConfig,received);
-              });
-              await putObject(key,bytes,'image/webp');
+            try {
+              const key=dishKey(row.id,item.i);
+              // A restart can land between a successful R2 write and its SQLite checkpoint.
+              if (!await objectExists(key)) {
+                const bytes=await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,received=>{
+                  active.add(item.i);
+                  notifyProgress(row.id);
+                  return generateDish(item.dish,imageConfig,received);
+                });
+                await putObject(key,bytes,'image/webp');
+              }
+              db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
+            } finally {
+              active.delete(item.i);
+              notifyProgress(row.id);
             }
-            db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
-            notifyProgress(row.id);
           }));
           if (results.some(result=>result.status==='rejected')) throw new Error('Image batch unfinished');
         }
@@ -422,6 +444,7 @@ async function runQueue() {
       } catch {
         db.prepare("UPDATE menus SET state='error' WHERE id=?").run(row.id);
       }
+      activeDishes.delete(row.id);
       notifyProgress(row.id);
     }
   } finally {
@@ -438,10 +461,9 @@ setInterval(()=>{
   db.prepare('DELETE FROM counters WHERE expires<=?').run(now);
   db.prepare('DELETE FROM sessions WHERE expires<=?').run(now);
   const cutoff = new Date(now-604_800_000).toISOString();
-  db.prepare("INSERT OR IGNORE INTO object_cleanup SELECT object_key FROM dish_objects JOIN menus ON menus.id=menu_id WHERE state='error' AND created<?").run(cutoff);
-  db.prepare("INSERT OR IGNORE INTO object_cleanup SELECT value FROM menus,json_each(payload,'$.originals') WHERE state='error' AND created<?").run(cutoff);
-  db.prepare("DELETE FROM dish_objects WHERE menu_id IN (SELECT id FROM menus WHERE state='error' AND created<?)").run(cutoff);
-  db.prepare("DELETE FROM menus WHERE state='error' AND created<?").run(cutoff);
+  const abandoned="state='error' AND created<? AND NOT EXISTS (SELECT 1 FROM dish_objects WHERE menu_id=menus.id)";
+  db.prepare(`INSERT OR IGNORE INTO object_cleanup SELECT value FROM menus,json_each(payload,'$.originals') WHERE ${abandoned}`).run(cutoff);
+  db.prepare(`DELETE FROM menus WHERE ${abandoned}`).run(cutoff);
   void cleanObjects();
 },3_600_000).unref();
 
@@ -631,9 +653,21 @@ async function adminApi(req,res,path) {
     db.prepare('DELETE FROM admin_sessions WHERE id=?').run(id);
     return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_admin=${cookieSuffix}; Max-Age=0`});
   }
+  if (path==='/api/admin/balance' && req.method==='POST') {
+    const body=await json(req,1024);
+    const organization=clean(body.organization,160,'Organization');
+    if (!organization || typeof body.usd!=='string' || !/^-?\d{1,9}(?:\.\d{1,2})?$/.test(body.usd)) {
+      throw new RequestError(400,'Enter the organization and its USD balance from OpenAI Billing.');
+    }
+    const balance={cents:Math.round(Number(body.usd)*100),organization,checked:new Date().toISOString()};
+    db.prepare('INSERT OR REPLACE INTO billing_snapshot (id,cents,organization,checked) VALUES (1,?,?,?)')
+      .run(balance.cents,balance.organization,balance.checked);
+    return write(res,200,{balance});
+  }
   if (path==='/api/admin/settings' && req.method==='GET') {
     const current=settings();
-    return write(res,200,{settings:current,imageModels,outputUsdPerMillion,readingModels,
+    const balance=db.prepare('SELECT cents,organization,checked FROM billing_snapshot WHERE id=1').get() ?? null;
+    return write(res,200,{settings:current,imageModels,outputUsdPerMillion,readingModels,balance,
       readingModel:current.readingModel,readingEfforts:readingModels[current.readingModel].efforts});
   }
   if (path==='/api/admin/settings' && req.method==='POST') {
@@ -653,14 +687,16 @@ async function api(req,res,path) {
     generation:ready, places:Boolean(environment.GOOGLE_PLACES_API_KEY || nzPlaces.length),maxDishes,
   });
   if (path === '/api/menus' && get) {
-    const rows = db.prepare("SELECT * FROM menus WHERE state='complete' ORDER BY date DESC,created DESC LIMIT 200").all();
-    return write(res,200,rows.map(card));
+    const rows=db.prepare(`SELECT menus.*,min(position) AS firstPhoto,count(position) AS completed
+      FROM menus JOIN dish_objects ON menu_id=menus.id GROUP BY menus.id
+      ORDER BY date DESC,created DESC LIMIT 200`).all();
+    return write(res,200,rows.map(row=>card(row)));
   }
   const menuId = path.match(/^\/api\/menus\/([a-f0-9]{20})$/)?.[1];
   if (menuId && get) {
-    const row = db.prepare("SELECT * FROM menus WHERE id=? AND state='complete'").get(menuId);
-    if (!row) throw new RequestError(404,'This menu could not be found.');
-    return write(res,200,publicMenu(row));
+    const menu=publicMenu(db.prepare('SELECT * FROM menus WHERE id=?').get(menuId));
+    if (!menu) throw new RequestError(404,'This menu could not be found.');
+    return write(res,200,menu);
   }
   const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|retry-read|retry|photos\/[0-5]))?$/);
   if (job) return jobApi(req,res,job[1],job[2]);
@@ -752,7 +788,7 @@ const server = createServer(async (req,res)=>{
     }
     const media = path.match(/^\/media\/([a-f0-9]{20})\/(\d{1,3})\.webp$/);
     if (media) {
-      const row = db.prepare("SELECT object_key FROM dish_objects JOIN menus ON menus.id=menu_id WHERE menu_id=? AND position=? AND state='complete'").get(media[1],Number(media[2]));
+      const row = db.prepare("SELECT object_key FROM dish_objects WHERE menu_id=? AND position=?").get(media[1],Number(media[2]));
       if (!row) throw new RequestError(404,'Image not found.');
       return write(res,200,await getObject(row.object_key),mime.webp,{'Cache-Control':'public, max-age=31536000, immutable'});
     }
@@ -763,13 +799,16 @@ const server = createServer(async (req,res)=>{
       let html = document;
       if (id) {
         const row=db.prepare('SELECT * FROM menus WHERE id=?').get(id);
-        if (row?.state!=='complete') {
+        const publicView=publicMenu(row);
+        if (!publicView) {
           const pending=row || db.prepare('SELECT id FROM drafts WHERE id=?').get(id);
           return write(res,pending ? 200 : 404,progressDocument(row),mime.html,{'X-Robots-Tag':'noindex'});
         }
-        const summary = card(row);
-        html = document.replace('<meta property="og:title" content="Menu Lens">', () => `<meta property="og:title" content="${escape(summary.restaurant.name)} · Menu Lens">`)
-          .replace('https://menu.9l.nz/images/hero.webp', `https://menu.9l.nz${summary.cover}`);
+        const title=escape(publicView.restaurant.name)+' · Menu Lens';
+        html=document.replace(/<main id="main"[\s\S]*?<\/main>/,()=>`<main id="main" class="shell">${renderMenu(publicView)}</main>`)
+          .replace(/<title>.*?<\/title>/,()=>`<title>${title}</title>`)
+          .replace('<meta property="og:title" content="Menu Lens">',()=>`<meta property="og:title" content="${title}">`)
+          .replace('https://menu.9l.nz/images/hero.webp',`https://menu.9l.nz${publicView.cover}`);
       }
       return write(res,200,html,mime.html);
     }

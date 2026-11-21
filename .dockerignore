@@ -6,3 +6,8 @@
 !usage.mjs
 !storage.mjs
 !migrate.mjs
+
+!public/
+public/*
+!public/menu-view.js
+!public/icons.js
