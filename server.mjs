@@ -57,7 +57,7 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const normalize = value => value.normalize('NFKC').toLocaleLowerCase('en-NZ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function settings() {
   const row = db.prepare('SELECT value FROM generation_settings WHERE id=1').get();
-  return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium',reasoning:'minimal'};
+  return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'medium',reasoning:'high'};
 }
 
 const history = generationHistory(db);

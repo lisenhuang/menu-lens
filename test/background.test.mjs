@@ -86,7 +86,7 @@ test('private uploads and approved illustrations finish with no client connected
       new URL(new URL(url).pathname,'http://127.0.0.1:${providerPort}'),options);`;
     child=fork(new URL('../server.mjs',import.meta.url),[],{
       silent:true,execArgv:['--import','data:text/javascript,'+encodeURIComponent(preload)],
-      env:{...process.env,HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
+      env:{...process.env,OPENAI_IMAGE_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
         OPENAI_API_KEY:'test',TURNSTILE_SECRET:'test',TURNSTILE_SITE_KEY:'test',TURNSTILE_HOSTNAME:'localhost',TURNSTILE_TEST:'0',ADMIN_PIN_VERIFIER:verifier,TRUST_CLOUDFLARE:'1'},
     });
     await until(()=>fetch(origin+'/healthz').then(r=>r.ok).catch(()=>false));
@@ -107,7 +107,7 @@ test('private uploads and approved illustrations finish with no client connected
   const settingsPath='/api/admin/settings';
   const login=body=>request('/api/admin/login','',body);
   assert.equal((await request('/api/admin/history')).status,401);
-  const newSettings={model:'gpt-image-2.5-sunburst',quality:'xhigh',reasoning:'high'};
+  const newSettings={model:'gpt-image-2.5-sunburst',quality:'xhigh',reasoning:'low'};
   assert.equal((await request(settingsPath)).status,401);
   assert.equal((await request(settingsPath,'',newSettings)).status,401);
   assert.equal((await login({pin,token:''})).status,403);
@@ -122,7 +122,8 @@ test('private uploads and approved illustrations finish with no client connected
   const admin=cookie.split(';')[0];
   assert.equal((await login({pin,token:'admin-valid'})).status,403);
   const defaults=await (await request(settingsPath,admin)).json();
-  assert.equal(defaults.imageModels['gpt-image-2.6-flare'].medium*defaults.outputUsdPerMillion/1e6,0.04347);
+  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'medium',reasoning:'high'});
+  assert.equal(defaults.imageModels[defaults.settings.model].medium*defaults.outputUsdPerMillion/1e6,0.04347);
   assert.equal((await request(settingsPath,admin,{...newSettings,model:'gpt-image-2'})).status,400);
   assert.equal((await request(settingsPath,admin,newSettings)).status,200);
   const first=await verify('Test kitchen');
@@ -135,7 +136,7 @@ test('private uploads and approved illustrations finish with no client connected
   holdRead=false;
   await start();
   await until(async()=> (await (await request(api,first.cookie)).json()).state==='review');
-  assert.equal(readingRequest.reasoning.effort,'high');
+  assert.equal(readingRequest.reasoning.effort,newSettings.reasoning);
   assert.deepEqual((await (await request(settingsPath,admin)).json()).settings,newSettings);
   const second=await verify('Second kitchen');
   assert.equal((await request(api,second.cookie)).status,404);
