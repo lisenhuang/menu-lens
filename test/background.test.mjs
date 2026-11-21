@@ -108,7 +108,7 @@ test('private uploads and approved illustrations finish with no client connected
       new URL(new URL(url).pathname,'http://127.0.0.1:${providerPort}'),options);`;
     child=fork(new URL('../server.mjs',import.meta.url),[],{
       silent:true,execArgv:['--import','data:text/javascript,'+encodeURIComponent(preload)],
-      env:{...process.env,R2_GATEWAY_URL:'http://localhost/__storage/',R2_GATEWAY_SECRET:'test-storage',OPENAI_IMAGE_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
+      env:{...process.env,R2_GATEWAY_URL:'http://localhost/__storage/',R2_GATEWAY_SECRET:'test-storage',OPENAI_IMAGE_MODEL:'',OPENAI_VISION_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
         OPENAI_API_KEY:'test',GOOGLE_PLACES_API_KEY:'test',TURNSTILE_SECRET:'test',TURNSTILE_SITE_KEY:'test',TURNSTILE_HOSTNAME:'localhost',TURNSTILE_TEST:'0',ADMIN_PIN_VERIFIER:verifier,TRUST_CLOUDFLARE:'1'},
     });
     await until(()=>fetch(origin+'/healthz').then(r=>r.ok).catch(()=>false));
@@ -169,7 +169,7 @@ test('private uploads and approved illustrations finish with no client connected
   const settingsPath='/api/admin/settings';
   const login=body=>request('/api/admin/login','',body);
   assert.equal((await request('/api/admin/history')).status,401);
-  const newSettings={model:'gpt-image-2.5-sunburst',quality:'xhigh',reasoning:'low'};
+  const newSettings={model:'gpt-image-2.5-sunburst',quality:'xhigh',readingModel:'gpt-6.1-terra',reasoning:'low'};
   assert.equal((await request(settingsPath)).status,401);
   assert.equal((await request(settingsPath,'',newSettings)).status,401);
   assert.equal((await login({pin,token:''})).status,403);
@@ -184,10 +184,20 @@ test('private uploads and approved illustrations finish with no client connected
   const admin=cookie.split(';')[0];
   assert.equal((await login({pin,token:'admin-valid'})).status,403);
   const defaults=await (await request(settingsPath,admin)).json();
-  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'high',reasoning:'high'});
+  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'high',readingModel:'gpt-5-mini',reasoning:'high'});
   assert.equal(defaults.imageModels[defaults.settings.model].high*defaults.outputUsdPerMillion/1e6,0.05268);
+  const {readingModel:defaultReadingModel,...olderSettings}=defaults.settings;
+  olderSettings.reasoning='low';
+  const previousDatabase=new DatabaseSync(join(dir,'menu.sqlite'));
+  previousDatabase.prepare('INSERT INTO generation_settings VALUES (1,?)').run(JSON.stringify(olderSettings));
+  previousDatabase.close();
+  assert.deepEqual((await (await request(settingsPath,admin)).json()).settings,{...olderSettings,readingModel:defaultReadingModel});
   assert.equal((await request(settingsPath,admin,{...newSettings,model:'gpt-image-2'})).status,400);
+  assert.equal((await request(settingsPath,admin,{...newSettings,readingModel:'invalid'})).status,400);
+  assert.equal((await request(settingsPath,admin,{...newSettings,readingModel:'gpt-6.2-astra',reasoning:'none'})).status,400);
   assert.equal((await request(settingsPath,admin,newSettings)).status,200);
+  const legacySave=await request(settingsPath,admin,{model:newSettings.model,quality:newSettings.quality,reasoning:newSettings.reasoning});
+  assert.deepEqual((await legacySave.json()).settings,newSettings);
   const restaurantPin={lat:-41.3,lng:174.7};
   const first=await verify('Test kitchen',restaurantPin);
   const api='/api/jobs/'+first.id;
@@ -207,6 +217,7 @@ test('private uploads and approved illustrations finish with no client connected
   await start();
   await until(async()=> (await (await request(api,first.cookie)).json()).state==='review');
   assert.equal(readingRequest.reasoning.effort,newSettings.reasoning);
+  assert.equal(readingRequest.model,newSettings.readingModel);
   assert.deepEqual((await (await request(settingsPath,admin)).json()).settings,newSettings);
   const second=await verify('Second kitchen');
   assert.equal((await request(api,second.cookie)).status,404);
@@ -255,10 +266,12 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(run.state,'complete');
   assert.equal(run.priced,2);
   assert.equal(run.attempts,5);
-  assert.ok(Math.abs(run.usd-0.037272)<1e-9);
+  assert.ok(Math.abs(run.usd-0.037799)<1e-9);
   const {calls}=await (await request('/api/admin/history/'+first.id,historyCookie)).json();
   assert.deepEqual(calls.map(x=>x.state),['interrupted','complete','interrupted','failed','complete']);
   assert.deepEqual(calls.map(x=>x.basis),['unknown','usage','unknown','unknown','usage']);
+  assert.equal(calls[1].model,newSettings.readingModel);
+  assert.equal(calls[1].level,newSettings.reasoning);
   assert.equal(calls[0].ip,'192.0.2.45');
   assert.equal(calls.at(-1).ip,'2001:db8::7');
   assert.equal((await request('/api/admin/history/'+first.id)).status,401);
@@ -307,6 +320,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(imageRequest.quality,'high');
   assert.equal(imageRequest.model,'gpt-image-2.6-sunburst');
   assert.equal(readingRequest.reasoning.effort,'high');
+  assert.equal(readingRequest.model,defaults.settings.readingModel);
 
   // A failed read keeps its R2 keys private across restarts. Duplicate retries
   // reuse the same attempt, even when the new read has already failed.

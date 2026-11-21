@@ -50,7 +50,7 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
     } catch(error) {message.textContent=error.message;}
   }
   function settingsForm(data) {
-    const {imageModels,readingModel,readingEfforts}=data;
+    const {imageModels,readingModels}=data;
     let saved=data.settings;
     const options=values=>values.map(v=>`<option value="${escape(v)}">${escape(v)}</option>`).join('');
     view('Generation dashboard','Manage generation settings and review costs for each menu.',`
@@ -63,8 +63,10 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
           <p>1024 × 1024. Prompt tokens and menu reading are billed separately. <a class="text-link" href="${guide}" target="_blank" rel="noopener noreferrer">OpenAI pricing calculator</a></p>
         </div>
         <h2>Menu reading</h2>
-        <label class="field">Thinking level<select class="control" name="reasoning">${options(readingEfforts)}</select></label>
-        <p class="field-hint">Reasoning effort for ${escape(readingModel)} when transcribing menu photos.</p>
+        <label class="field">Menu-reading model<select class="control" name="readingModel">${options(Object.keys(readingModels))}</select></label>
+        <small class="field-hint" id="reading-rates"></small>
+        <label class="field">Thinking level<select class="control" name="reasoning"></select></label>
+        <p class="field-hint">Applies the next time menu photos are read, including retries.</p>
         <p id="admin-message" role="status"></p>
         <div class="inline-actions"><button class="btn primary" type="submit" disabled>Save settings</button>
         <button class="btn quiet" type="button" id="sign-out">Sign out</button></div>
@@ -76,10 +78,18 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
         <button id="history-more" class="btn quiet small" type="button" hidden>Load older menus</button>
       </section></div>`);
     const form=document.querySelector('#admin-settings');
-    const {model,quality,reasoning}=form.elements;
+    const {model,quality,readingModel,reasoning}=form.elements;
     const save=form.querySelector('[type="submit"]'),message=form.querySelector('#admin-message');
     model.value=saved.model;
-    reasoning.value=saved.reasoning;
+    readingModel.value=saved.readingModel;
+    function reasoningOptions(preferred) {
+      const {efforts:levels,input,output}=readingModels[readingModel.value];
+      reasoning.innerHTML=options(levels);
+      reasoning.value=levels.includes(preferred) ? preferred : 'high';
+      form.querySelector('#reading-rates').textContent=Number.isFinite(input) ?
+        `US$${input} per million input tokens and US$${output} per million output tokens at standard rates.` : '';
+    }
+    reasoningOptions(saved.reasoning);
     function qualityOptions(preferred) {
       const levels=Object.keys(imageModels[model.value]);
       quality.innerHTML=options(levels);
@@ -89,17 +99,18 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
     function sync() {
       const cost=imageModels[model.value][quality.value]*data.outputUsdPerMillion/1e6;
       form.querySelector('#estimate').textContent='$'+cost.toFixed(5);
-      save.disabled=model.value===saved.model && quality.value===saved.quality && reasoning.value===saved.reasoning;
+      save.disabled=model.value===saved.model && quality.value===saved.quality && readingModel.value===saved.readingModel && reasoning.value===saved.reasoning;
     }
     form.addEventListener('change',event=>{
       if (event.target===model) qualityOptions(quality.value);
+      if (event.target===readingModel) reasoningOptions(reasoning.value);
       message.textContent='';sync();
     });
     form.addEventListener('submit',async event=>{
       event.preventDefault();
       save.disabled=true;
       try {
-        const result=await api('/admin/settings',{model:model.value,quality:quality.value,reasoning:reasoning.value});
+        const result=await api('/admin/settings',{model:model.value,quality:quality.value,readingModel:readingModel.value,reasoning:reasoning.value});
         saved=result.settings;
         message.textContent='Settings saved.';
       } catch(error) {

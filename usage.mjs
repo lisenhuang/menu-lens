@@ -1,15 +1,22 @@
 import {isIP} from 'node:net';
-import {imageModels,outputUsdPerMillion} from './admin.mjs';
+import {imageModels,outputUsdPerMillion,readingModels} from './admin.mjs';
 
 const tokenCount=n=>Number.isSafeInteger(n) && n>=0;
 const dollars=value=>value/1_000_000;
 function price(kind,model,level,usage,receivedOutput) {
   if (kind==='read') {
-    // Standard GPT-5 mini rates. Other vision models require their own rate card.
-    const cached=usage?.input_tokens_details?.cached_tokens ?? 0;
-    if (/^gpt-5-mini(?:-2025-08-07)?$/.test(model) && tokenCount(usage?.input_tokens) &&
-        tokenCount(usage.output_tokens) && tokenCount(cached) && cached<=usage.input_tokens) {
-      return {usd:dollars((usage.input_tokens-cached)*0.25+cached*0.025+usage.output_tokens*2),basis:'usage'};
+    const rates=readingModels[model.replace(/-\d{4}-\d{2}-\d{2}$/,'')];
+    const details=usage?.input_tokens_details;
+    const cached=details?.cached_tokens ?? 0;
+    const writes=details?.cache_write_tokens ?? 0;
+    const extended=details?.cache_write_tokens_details?.ttl_12h_tokens ?? 0;
+    if (Number.isFinite(rates?.input) && tokenCount(usage?.input_tokens) && tokenCount(usage.output_tokens) &&
+        tokenCount(cached) && tokenCount(writes) && tokenCount(extended) && extended<=writes && cached+writes<=usage.input_tokens) {
+      const ordinary=usage.input_tokens-cached-writes;
+      const input=(ordinary+(writes-extended)*1.25+extended*2.5)*rates.input+cached*rates.cached;
+      const output=usage.output_tokens*rates.output;
+      const long=rates.longContext && usage.input_tokens>272000;
+      return {usd:dollars(long ? input*2+output*1.5 : input+output),basis:'usage'};
     }
   } else if (Object.hasOwn(imageModels,model)) {
     // The Images API receives a text-only prompt for each dish.

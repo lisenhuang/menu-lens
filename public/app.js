@@ -858,7 +858,7 @@ try {
 
 const route = location.pathname.replace(/\/$/,'') || '/';
 if (route==='/') void home();
-else if (route==='/admin') void import('./admin.js?v=3').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
+else if (route==='/admin') void import('./admin.js?v=4').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();

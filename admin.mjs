@@ -23,10 +23,27 @@ export const imageModels={
   'gpt-image-2':{low:196,medium:1756,high:7024},
 };
 export const outputUsdPerMillion=30;
-export const readingEfforts=['minimal','low','medium','high'];
-export function validateSettings({model,quality,reasoning}) {
-  if (typeof model!=='string' || typeof quality!=='string' || !Object.hasOwn(imageModels,model) || !Object.hasOwn(imageModels[model],quality) || !readingEfforts.includes(reasoning)) {
-    throw new RequestError(400,'Choose a supported model, image quality and menu-reading effort.');
+// Standard Responses API rates in USD per million tokens, from each model's OpenAI model card.
+const legacyEfforts=['minimal','low','medium','high'];
+const modernEfforts=['low','medium','high','xhigh','max'];
+export const defaultReader=process.env.OPENAI_VISION_MODEL || 'gpt-5-mini';
+export const readingModels={
+  'gpt-5-mini':{efforts:legacyEfforts,input:0.25,cached:0.025,output:2},
+  'gpt-5.4-mini':{efforts:['none','low','medium','high','xhigh'],input:0.75,cached:0.075,output:4.5},
+  'gpt-6.1-terra':{efforts:['none',...modernEfforts],input:1,cached:0.05,output:5,longContext:true},
+  'gpt-6.2-sol':{efforts:modernEfforts,input:2,cached:0.1,output:10,longContext:true},
+  'gpt-6.2-astra':{efforts:modernEfforts,input:8,cached:0.4,output:40,longContext:true},
+};
+if (!Object.hasOwn(readingModels,defaultReader)) {
+  const alias=defaultReader.replace(/-\d{4}-\d{2}-\d{2}$/,'');
+  readingModels[defaultReader]=Object.hasOwn(readingModels,alias) ? readingModels[alias] : {efforts:legacyEfforts};
+}
+export function validateSettings({model,quality,readingModel,reasoning}) {
+  if (typeof model!=='string' || typeof quality!=='string' || !Object.hasOwn(imageModels,model) || !Object.hasOwn(imageModels[model],quality)) {
+    throw new RequestError(400,'Choose a supported image model and rendering quality.');
   }
-  return {model,quality,reasoning};
+  if (typeof readingModel!=='string' || !Object.hasOwn(readingModels,readingModel) || !readingModels[readingModel].efforts.includes(reasoning)) {
+    throw new RequestError(400,'Choose a supported menu-reading model and thinking level.');
+  }
+  return {model,quality,readingModel,reasoning};
 }

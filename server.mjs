@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {generateDish, googlePlaces, readMenu, RequestError, verifyPerson} from './providers.mjs';
 
 import {generationHistory} from './usage.mjs';
-import {imageModels, matchesPin, outputUsdPerMillion, readingEfforts, validateSettings} from './admin.mjs';
+import {defaultReader, imageModels, matchesPin, outputUsdPerMillion, readingModels, validateSettings} from './admin.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
@@ -69,16 +69,19 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const normalize = value => value.normalize('NFKC').toLocaleLowerCase('en-NZ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function settings() {
   const row = db.prepare('SELECT value FROM generation_settings WHERE id=1').get();
-  return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'high',reasoning:'high'};
+  const current={model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'high',readingModel:defaultReader,reasoning:'high',
+    ...(row && JSON.parse(row.value))};
+  if (!Object.hasOwn(readingModels,current.readingModel)) current.readingModel=defaultReader;
+  if (!readingModels[current.readingModel].efforts.includes(current.reasoning)) current.reasoning='high';
+  return current;
 }
 
 const history = generationHistory(db);
 function readForRun(id,pages,requestIp) {
-  const model=environment.OPENAI_VISION_MODEL || 'gpt-5-mini';
-  const {reasoning}=settings();
+  const {readingModel:model,reasoning}=settings();
   return history.measure(id,'read','Menu transcription',model,reasoning,received=>{
     notifyProgress(id);
-    return readMenu(pages,reasoning,received);
+    return readMenu(pages,model,reasoning,received);
   },requestIp);
 }
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
@@ -629,10 +632,13 @@ async function adminApi(req,res,path) {
     return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_admin=${cookieSuffix}; Max-Age=0`});
   }
   if (path==='/api/admin/settings' && req.method==='GET') {
-    return write(res,200,{settings:settings(),imageModels,outputUsdPerMillion,readingEfforts,readingModel:environment.OPENAI_VISION_MODEL || 'gpt-5-mini'});
+    const current=settings();
+    return write(res,200,{settings:current,imageModels,outputUsdPerMillion,readingModels,
+      readingModel:current.readingModel,readingEfforts:readingModels[current.readingModel].efforts});
   }
   if (path==='/api/admin/settings' && req.method==='POST') {
-    const next=validateSettings(await json(req,2048));
+    const body=await json(req,2048);
+    const next=validateSettings({readingModel:settings().readingModel,...body});
     db.prepare('INSERT INTO generation_settings VALUES (1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(JSON.stringify(next));
     return write(res,200,{settings:next});
   }
