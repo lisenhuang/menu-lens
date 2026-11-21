@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {generateDish, googlePlaces, readMenu, RequestError, verifyPerson} from './providers.mjs';
 
 import {generationHistory} from './usage.mjs';
-import {defaultReader, imageModels, matchesPin, outputUsdPerMillion, readingModels, validateSettings} from './admin.mjs';
+import {defaultReader, defaultReadingEffort, imageModels, matchesPin, outputUsdPerMillion, readingModels, validateSettings} from './admin.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
@@ -73,10 +73,10 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const normalize = value => value.normalize('NFKC').toLocaleLowerCase('en-NZ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function settings() {
   const row = db.prepare('SELECT value FROM generation_settings WHERE id=1').get();
-  const current={model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'high',readingModel:defaultReader,reasoning:'high',
+  const current={model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'high',readingModel:defaultReader,reasoning:defaultReadingEffort,
     ...(row && JSON.parse(row.value))};
   if (!Object.hasOwn(readingModels,current.readingModel)) current.readingModel=defaultReader;
-  if (!readingModels[current.readingModel].efforts.includes(current.reasoning)) current.reasoning='high';
+  if (!readingModels[current.readingModel].efforts.includes(current.reasoning)) current.reasoning=defaultReadingEffort;
   return current;
 }
 

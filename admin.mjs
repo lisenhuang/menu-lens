@@ -26,7 +26,8 @@ export const outputUsdPerMillion=30;
 // Standard Responses API rates in USD per million tokens, from each model's OpenAI model card.
 const legacyEfforts=['minimal','low','medium','high'];
 const modernEfforts=['low','medium','high','xhigh','max'];
-export const defaultReader=process.env.OPENAI_VISION_MODEL || 'gpt-5-mini';
+export const defaultReader=process.env.OPENAI_VISION_MODEL || 'gpt-6.1-terra';
+export const defaultReadingEffort='medium';
 export const readingModels={
   'gpt-5-mini':{efforts:legacyEfforts,input:0.25,cached:0.025,output:2},
   'gpt-5.4-mini':{efforts:['none','low','medium','high','xhigh'],input:0.75,cached:0.075,output:4.5},

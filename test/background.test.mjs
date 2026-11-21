@@ -169,7 +169,7 @@ test('private uploads and approved illustrations finish with no client connected
   const settingsPath='/api/admin/settings';
   const login=body=>request('/api/admin/login','',body);
   assert.equal((await request('/api/admin/history')).status,401);
-  const newSettings={model:'gpt-image-2.5-sunburst',quality:'xhigh',readingModel:'gpt-6.1-terra',reasoning:'low'};
+  const newSettings={model:'gpt-image-2.5-sunburst',quality:'xhigh',readingModel:'gpt-5-mini',reasoning:'low'};
   assert.equal((await request(settingsPath)).status,401);
   assert.equal((await request(settingsPath,'',newSettings)).status,401);
   assert.equal((await login({pin,token:''})).status,403);
@@ -194,7 +194,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.ok(Number.isFinite(Date.parse(recorded.checked)));
   assert.deepEqual((await (await request(settingsPath,admin)).json()).balance,recorded);
   assert.equal((await (await request('/api/config')).json()).balance,undefined);
-  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'high',readingModel:'gpt-5-mini',reasoning:'high'});
+  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'high',readingModel:'gpt-6.1-terra',reasoning:'medium'});
   assert.equal(defaults.imageModels[defaults.settings.model].high*defaults.outputUsdPerMillion/1e6,0.05268);
   const {readingModel:defaultReadingModel,...olderSettings}=defaults.settings;
   olderSettings.reasoning='low';
@@ -276,7 +276,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(run.state,'complete');
   assert.equal(run.priced,2);
   assert.equal(run.attempts,5);
-  assert.ok(Math.abs(run.usd-0.037799)<1e-9);
+  assert.ok(Math.abs(run.usd-0.037272)<1e-9);
   const {calls}=await (await request('/api/admin/history/'+first.id,historyCookie)).json();
   assert.deepEqual(calls.map(x=>x.state),['interrupted','complete','interrupted','failed','complete']);
   assert.deepEqual(calls.map(x=>x.basis),['unknown','usage','unknown','unknown','usage']);
@@ -355,7 +355,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal((await request('/originals/'+mixed.id+'/0.jpg')).status,200);
   assert.equal(imageRequest.quality,'high');
   assert.equal(imageRequest.model,'gpt-image-2.6-sunburst');
-  assert.equal(readingRequest.reasoning.effort,'high');
+  assert.equal(readingRequest.reasoning.effort,'medium');
   assert.equal(readingRequest.model,defaults.settings.readingModel);
 
   // A failed read keeps its R2 keys private across restarts. Duplicate retries

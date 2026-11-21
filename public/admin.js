@@ -93,7 +93,7 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
     function reasoningOptions(preferred) {
       const {efforts:levels,input,output}=readingModels[readingModel.value];
       reasoning.innerHTML=options(levels);
-      reasoning.value=levels.includes(preferred) ? preferred : 'high';
+      reasoning.value=levels.includes(preferred) ? preferred : 'medium';
       form.querySelector('#reading-rates').textContent=Number.isFinite(input) ?
         `US$${input} per million input tokens and US$${output} per million output tokens at standard rates.` : '';
     }
