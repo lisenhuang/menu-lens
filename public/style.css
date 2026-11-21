@@ -214,7 +214,7 @@ dialog .btn{max-width:100%;white-space:normal}
 .collection-empty .btn{margin-top:1rem}
 
 .progress-panel{max-width:650px}
-.job-stages{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));list-style:none;padding:0;margin:0 0 1.5rem;gap:.4rem}
+.job-stages{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));list-style:none;padding:0;margin:0 0 1.5rem;gap:.4rem}
 .job-stages li{color:var(--muted);font-size:.8rem;font-weight:600}
 .job-stages li span{display:block;height:.26rem;background:var(--line);border-radius:1rem;margin-bottom:.45rem}
 .job-stages li.past span{background:var(--green)}

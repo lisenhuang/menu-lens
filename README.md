@@ -1,12 +1,12 @@
 # Menu Lens
 
-Turn a photo of a restaurant menu into a public, dated menu with an AI illustration for every dish. Diners review the original names, descriptions and printed prices before publishing. [Open Menu Lens](https://menu.9l.nz/)
+Turn a photo of a restaurant menu into a public, dated menu with an AI illustration for every dish. Menu Lens reads the original names, descriptions and printed prices, then illustrates and publishes the menu automatically. [Open Menu Lens](https://menu.9l.nz/)
 
 [![Menu Lens homepage with a bowl of pappardelle](docs/screenshots/home.jpg)](https://menu.9l.nz/)
 
-**Upload photos → confirm the restaurant → review the menu → publish**
+**Upload photos → choose the restaurant → generate and publish**
 
-After uploading, copy the menu link before closing the tab. Open it in the same browser within 24 hours to review the draft or retry a failed read using the saved photos. Each read has up to five minutes. Menus with a photo for every dish stop after reading. Approved menus appear at the same link with the original photos in a collapsed section.
+After uploading, copy the menu link before closing the tab. Open it in the same browser within 24 hours to follow progress or retry a failed read using the saved photos. Each read has up to five minutes. Menus with a photo for every dish stop after reading. Finished menus appear at the same link with the original photos in a collapsed section.
 
 | Choose a theme | Browse a published menu |
 | :---: | :---: |

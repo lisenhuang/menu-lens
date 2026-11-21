@@ -139,9 +139,9 @@ test('private uploads and approved illustrations finish with no client connected
       },
     };
   }
-  async function verify(name,restaurantPin) {
+  async function verify(name,restaurantPin,autoPublish=false) {
     const r=await request('/api/verify','',{name,address:'Example Street',date:'2025-01-01',
-      pin:restaurantPin,locationConfirmed:true,consent:true,shareOriginals:true,token:'test'});
+      pin:restaurantPin,autoPublish,consent:true,shareOriginals:true,token:'test'});
     assert.equal(r.status,200);
     const {id}=await r.json();
     const cookie=r.headers.getSetCookie().find(value=>value.startsWith('ml_job=')).split(';')[0];
@@ -278,17 +278,17 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(imageCalls,imagesBefore);
   visionResult={...menu,dishes:[...visionResult.dishes,{...menu.dishes[0],name:'Bread',hasDishPhoto:false}]};
   holdRead=true;
-  const mixed=await verify('Mixed photos');
+  const mixed=await verify('Mixed photos',undefined,true);
   const mixedPath='/api/jobs/'+mixed.id;
   assert.equal((await request(mixedPath+'/upload',mixed.cookie,{pages:[photo,photo]})).status,202);
   const reading=await events(mixedPath,mixed.cookie);
   const readStatus=await reading.next(job=>job.state==='reading' && job.transcribing);
   assert.equal(readStatus.pageCount,2);
-  holdRead=false;
-  await reading.next(job=>job.state==='review');
   holdImages=true;
   holdBread=true;
-  assert.equal((await request(mixedPath+'/publish',mixed.cookie,{...visionResult,reviewed:true})).status,202);
+  holdRead=false;
+  await reading.next(job=>job.state==='running');
+  reading.close();
   const images=await events(mixedPath,mixed.cookie);
   await images.next(job=>job.illustrating?.includes('Soup') && job.illustrating.includes('Bread'));
   holdImages=false;
@@ -354,6 +354,30 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal((await request(keptPath,kept.cookie)).status,404);
   assert.equal((await retryRead(1)).status,403);
   ledger.close();
+  await t.test('automatic publication survives a restart without a client or a second submission',async()=>{
+    visionResult=menu;
+    holdRead=true;
+    const auto=await verify('Automatic kitchen',undefined,true);
+    const path='/api/jobs/'+auto.id;
+    const upload=()=>request(path+'/upload',auto.cookie,{pages:[photo]},'192.0.2.100');
+    const startReads=readCalls;
+    assert.equal((await upload()).status,202);
+    await until(()=>readCalls===startReads+1);
+    assert.equal((await upload()).status,202);
+    assert.equal((await request('/api/menus/'+auto.id)).status,404);
+    await stop();
+    holdRead=false;
+    const beforeImages=imageCalls;
+    await start();
+    await until(async()=> (await request('/api/menus/'+auto.id)).ok);
+    const result=await (await request('/api/menus/'+auto.id)).json();
+    assert.equal(result.dishes[0].name,'Soup');
+    assert.equal(result.dishes[0].price,'$9');
+    assert.equal(result.originals.length,1);
+    assert.equal((await upload()).status,202);
+    assert.equal(imageCalls,beforeImages+1);
+    assert.equal(readCalls,startReads+2);
+  });
   assert.equal((await request('/fonts/dm-sans-OFL.txt')).status,200);
   assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);
 });

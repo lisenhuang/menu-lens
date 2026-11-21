@@ -246,9 +246,9 @@ function privacy() {
   document.title = 'Privacy · Menu Lens';
   page('Privacy','MENU LENS','What happens to your menu photo and location.',
     `<div class="panel privacy">
-      <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, reviewed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
-      <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Review and remove private details before submitting.</p>
-      <p>OpenAI reads your menu photos. Draft photos stay private for up to 24 hours, including when reading fails. You can retry from the same browser during that time. When you publish, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
+      <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, transcribed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
+      <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Remove private details from the photos before uploading.</p>
+      <p>OpenAI reads your menu photos. Photos stay private while the menu is being prepared. If reading fails, you can retry from the same browser within 24 hours of uploading. Once the menu is published, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
       <p>Save the menu link to return to your draft. A cookie lets you open it in the browser you used to upload.</p>
       <p>Menu Lens stores the requesting IP address alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
@@ -259,13 +259,12 @@ function privacy() {
 
 const state = {
   step:1, files:[], preparing:null, name:'',address:'',date:localDate(),place:null, position:null,
-  confirmed:false, manualPin:'', transcript:'', notes:'',dishes:[],warnings:[],read:false,
-  config:null,verified:false,submissionId:null,
+  manualPin:'',config:null,
 };
-let flow;
+let flow,configRequest;
 function buildFlow() {
   document.title = 'Create a visual menu · Menu Lens';
-  page('Create a visual menu','FROM PAPER TO PICTURE','Upload a clear menu photo, review the original details, and share a dated visual menu.',
+  page('Create a visual menu','FROM PAPER TO PICTURE','Upload your photos and choose the restaurant. Menu Lens reads the dishes and prices, illustrates the menu and publishes it for you.',
     `<div class="flow"><section class="panel" id="flow"></section>
       <aside class="panel side-panel"><h3>Before you upload</h3><ul>
       <li>${icon('camera')} <span>Capture the page straight on and check that prices are readable.</span></li>
@@ -274,7 +273,7 @@ function buildFlow() {
       </ul></aside></div>`);
   flow = $('#flow');
   renderStep();
-  api('/config').then(config=>{
+  configRequest=api('/config').then(config=>{
     state.config=config;
     if (state.step===1) updateUpload();
     if (state.step===2) updateLocation();
@@ -286,9 +285,9 @@ function buildFlow() {
 
 }
 function renderStep() {
-  const labels = ['Photos','Restaurant','Review'];
+  const labels = ['Photos','Restaurant'];
   flow.innerHTML = `<div class="steps" aria-label="Submission progress">${labels.map((item,i)=>`<span ${state.step===i+1 ? 'aria-current="step"' : ''}><b>${i+1}</b>${item}</span>`).join('')}</div>`;
-  [uploadStep,locationStep,reviewStep][state.step-1]();
+  [uploadStep,locationStep][state.step-1]();
 }
 function go(step) {
   state.step=step;
@@ -346,7 +345,6 @@ function updateUpload() {
   list.querySelectorAll('button').forEach(button=>button.onclick=()=>{
     URL.revokeObjectURL(state.files[Number(button.dataset.remove)].url);
     state.files.splice(Number(button.dataset.remove),1);
-    state.read=false;
     updateUpload();
   });
   $('#next').disabled=!state.files.length || Boolean(batch);
@@ -370,7 +368,6 @@ async function addFiles(files) {
       if (file.size>22_000_000) throw new Error('too large');
       const blob=await preparePhoto(file);
       state.files.push({name:file.name || 'Menu photo',blob,url:URL.createObjectURL(blob)});
-      state.read=false;
     } catch {
       messages.push(`${file.name || 'The photo'} could not be opened. Try a JPG, PNG or WebP file under 22 MB.`);
     }
@@ -428,9 +425,11 @@ function locationStep() {
       </details>
       <label class="field">Date photographed<input class="control" type="date" id="menu-date" min="1900-01-01" max="${localDate()}" required value="${escape(state.date)}"></label>
       <div id="distance"></div>
-      <p class="error" id="step-error" role="alert" hidden></p>
+      <p>By choosing <strong>Generate &amp; publish</strong>, you agree to make the restaurant details, dish prices and your original menu photos public. Only upload photos you have permission to share.</p>
+      <div id="challenge" aria-label="Human verification"></div>
+      ${progressFeedback('transfer-progress')}<p class="error" id="step-error" role="alert" hidden></p>
       <div class="form-actions"><button type="button" class="btn text back" id="back">${icon('back')} Photos</button>
-        <button type="submit" class="btn primary">${icon('shield')} Review &amp; submit</button></div>
+        <button type="submit" id="generate" class="btn primary" disabled>${icon('sparkles')} Generate &amp; publish</button></div>
     </form>`);
   let searchVersion=0;
   const results=$('#place-results');
@@ -452,16 +451,13 @@ function locationStep() {
         state.place=null;
       }
       state[key]=event.target.value;
-      state.confirmed=false;
-      state.verified=false;
       updateLocation();
     });
   }
   captureEdit('name','#restaurant-name');
   captureEdit('address','#restaurant-address');
   captureEdit('manualPin','#pin-coordinates');
-  $('#menu-date').addEventListener('input',event=>{state.date=event.target.value;state.verified=false;});
-  $('#back').onclick=()=>go(1);
+  $('#menu-date').addEventListener('input',event=>{state.date=event.target.value;});
   const searchButton=$('#place-search');
   async function findPlaces() {
     if (searchButton.disabled) return;
@@ -490,22 +486,7 @@ function locationStep() {
     }
   };
   $('#gps').onclick=requestLocation;
-  $('#location-form').addEventListener('submit',event=>{
-    event.preventDefault();
-    const pin = state.manualPin?.trim();
-    if (pin && !restaurantPin()) {
-      errorAt($('#step-error'),'Use a latitude and longitude separated by a comma, such as -41.294, 174.784.');
-      return;
-    }
-    if (locationCheck().confirm && !state.confirmed) {
-      errorAt($('#step-error'),'Confirm that the restaurant address is correct before continuing.');
-      $('#confirm-location')?.focus();
-      return;
-    }
-    errorAt($('#step-error'),'');
-    if (state.verified && state.read) return go(3);
-    consentModal();
-  });
+  setupGeneration($('#location-form'));
   updateLocation();
 }
 function restaurantPin() {
@@ -515,22 +496,18 @@ function restaurantPin() {
   if (!match || Math.abs(+match[1])>90 || Math.abs(+match[2])>180) return null;
   return {lat:+match[1],lng:+match[2]};
 }
-function locationCheck() {
+function distanceMessage() {
   const pin=restaurantPin();
   const gps=state.position;
-  if (!gps || !pin) return {confirm:true,message:'Confirm this is the right restaurant branch. A distance check needs your GPS location and a restaurant pin.'};
+  if (!gps || !pin) return '';
   const radians=degrees=>degrees*Math.PI/180;
   const deltaLat=radians(pin.lat-gps.lat);
   const deltaLng=radians(pin.lng-gps.lng);
   const a=Math.sin(deltaLat/2)**2+Math.cos(radians(gps.lat))*Math.cos(radians(pin.lat))*Math.sin(deltaLng/2)**2;
   const distance=12742*Math.asin(Math.min(1,Math.sqrt(a)));
-  const far=distance>=5;
-  const uncertain=gps.accuracy>1500;
   const km = distance<.1 ? 'less than 100 m' : new Intl.NumberFormat('en-NZ',{maximumFractionDigits:distance<20?1:0}).format(distance)+' km';
-  const message=far ? `This restaurant is about ${km} from you. Double-check the branch before continuing.` :
-    uncertain ? 'Your GPS location is approximate. Double-check the branch before continuing.' :
+  return gps.accuracy>1500 ? `Based on your approximate location, this branch is about ${km} away.` :
     `This restaurant is ${km} from your location.`;
-  return {confirm:far||uncertain,message};
 }
 function updateLocation() {
   if (!$('#map-link')) return;
@@ -541,15 +518,12 @@ function updateLocation() {
   $('#location-status').textContent=state.gpsMessage || (state.config?.places===false ?
     'Use the Google Maps link to look up the address, then enter it here.' :
     'Location helps check the distance to the branch. Your GPS stays on this device.');
-  const check=locationCheck();
-  $('#distance').innerHTML=check.confirm ?
-    `${notice(check.message,'pin')}<label class="checkbox confirm-place"><input type="checkbox" id="confirm-location" ${state.confirmed?'checked':''}>I confirm this is the correct restaurant and address.</label>` :
-    notice(check.message,'check');
-  if (check.confirm) $('#confirm-location').onchange=event=>{state.confirmed=event.target.checked;};
+  const message=distanceMessage();
+  $('#distance').textContent=message;
 }
 function requestLocation() {
   if (!navigator.geolocation) {
-    state.gpsMessage='Location is unavailable. You can still confirm the address.';
+    state.gpsMessage='Location is unavailable. You can enter the address directly.';
     return updateLocation();
   }
   $('#gps').disabled=true;
@@ -563,10 +537,9 @@ function requestLocation() {
   navigator.geolocation.getCurrentPosition(({coords})=>{
     state.position={lat:coords.latitude,lng:coords.longitude,accuracy:coords.accuracy};
     state.gpsMessage='Location is available for this submission.';
-    state.confirmed=false;
     finish();
   },()=>{
-    state.gpsMessage='Location was unavailable. You can still confirm the address.';
+    state.gpsMessage='Location was unavailable. You can enter the address directly.';
     finish();
   },{enableHighAccuracy:false,timeout:10000,maximumAge:120000});
 }
@@ -589,25 +562,14 @@ function renderPlaces(list,{places,source}) {
     state.manualPin=$('#pin-coordinates').value=pinText(place);
     state.name=$('#restaurant-name').value=place.name;
     state.address=$('#restaurant-address').value=place.address || state.manualPin;
-    state.confirmed=false;
-    state.verified=false;
     list.textContent=place.fullAddress===false ? 'Restaurant pin selected. You can add a street address if you know it.' : 'Branch location filled in.';
     errorAt($('#step-error'),'');
     updateLocation();
-    ($('#confirm-location') || $('#menu-date')).focus({preventScroll:true});
+    $('#menu-date').focus({preventScroll:true});
   });
 }
 
-let widget;
 let turnstileScript;
-let reading=false;
-dialog.addEventListener('cancel',event=>{if(reading) event.preventDefault();});
-dialog.addEventListener('close',()=>{
-  if (widget!==undefined) {
-    window.turnstile?.remove(widget);
-    widget=undefined;
-  }
-});
 function loadTurnstile() {
   if (window.turnstile) return Promise.resolve();
   if (!turnstileScript) turnstileScript=new Promise((resolve,reject)=>{
@@ -620,52 +582,36 @@ function loadTurnstile() {
   });
   return turnstileScript;
 }
-function consentModal() {
-  const ready=state.config?.generation;
-  showModal('Share this menu publicly','globe',`
-    <p>To generate this menu, you must agree to publish it. The finished page will show <strong>${escape(state.name)}</strong>, the restaurant location, the menu date, reviewed text and AI dish images. Anyone can open and share the link.</p>
-    <p>OpenAI checks the photos first. If every dish already has a photo, generation stops. Otherwise, the photos you submit will be kept and shared in the Original menu section when you publish. Your GPS stays private. Menu Lens records the requesting IP address in its private generation history.</p>
-    <label class="checkbox"><input type="checkbox" id="consent">I agree to publish the restaurant details and my original menu photos.</label>
-    ${ready ? '<div id="challenge" aria-label="Human verification"></div>' : notice('New menu generation is temporarily unavailable.')}
-    ${progressFeedback('transfer-progress')}<p class="error" id="verify-error" role="alert" hidden></p>
-    <div class="form-actions">${primary('Verify &amp; read menu','shield','id="read-menu" disabled')}</div>`);
-  if (!ready) return;
-  const consent=$('#consent',dialog);
-  const error=$('#verify-error',dialog);
-  const target=$('#challenge',dialog);
-  const read=$('#read-menu',dialog);
-  let token='';
-  function sync(){read.disabled=reading || !consent.checked || !token;}
-  loadTurnstile().then(()=>{
-    if (!dialog.open || !target.isConnected) return;
-    widget=window.turnstile.render(target,{
-      sitekey:state.config.siteKey,action:'menu_submit',theme:getComputedStyle(document.documentElement).colorScheme==='dark'?'dark':'light',
-      size:matchMedia('(max-width: 375px)').matches?'compact':'normal',
-      callback:value=>{token=value;sync();},
-      'expired-callback':()=>{token='';sync();},
-      'error-callback':()=>{token='';sync();errorAt(error,'The human check failed to load. Close this window and try again.');},
-    });
-  }).catch(errorValue=>errorAt(error,errorValue.message));
-  consent.onchange=sync;
-  read.onclick=async()=>{
-    if (!token || !consent.checked || reading) return;
-    reading=true;
-    sync();
+async function setupGeneration(form) {
+  const target=$('#challenge',form);
+  const error=$('#step-error',form);
+  const button=$('#generate',form);
+  const back=$('#back',form);
+  let token='',widget,busy=false;
+  function sync(){ button.disabled=busy || !token; }
+  back.onclick=()=>{
+    if (busy) return;
+    if (widget!==undefined) window.turnstile.remove(widget);
+    go(1);
+  };
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    if (busy || !token) return;
+    if (state.manualPin.trim() && !restaurantPin()) {
+      errorAt(error,'Use a latitude and longitude separated by a comma, such as -41.294, 174.784.');
+      return;
+    }
     errorAt(error,'');
-    $('.modal-close',dialog).disabled=true;
-    read.textContent='Submitting…';
+    busy=true;
+    sync();
+    back.disabled=true;
+    button.textContent='Submitting…';
     showPhotoProgress('transfer-progress','Verifying submission…');
     try {
-      const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,pin:restaurantPin(),
-        locationConfirmed:state.confirmed || !locationCheck().confirm,consent:true,shareOriginals:true,token});
+      const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,
+        placeId:state.place?.id,pin:restaurantPin(),consent:true,shareOriginals:true,autoPublish:true,token});
       showPhotoProgress('transfer-progress','Preparing upload…');
-      const pages=await Promise.all(state.files.map(async file=>{
-        const blob=file.blob || await fetch(file.url).then(response=>{
-          if (!response.ok) throw new Error('Your source photo has expired. Upload the menu again.');
-          return response.blob();
-        });
-        return dataUrl(blob);
-      }));
+      const pages=await Promise.all(state.files.map(file=>dataUrl(file.blob)));
       showPhotoProgress('transfer-progress','Uploading photos…');
       await uploadPhotos(verified.id,pages,fraction=>{
         if (fraction>=1) showPhotoProgress('transfer-progress','Saving uploaded photos…');
@@ -679,118 +625,37 @@ function consentModal() {
         const link=document.createElement('a');
         link.className='text-link';
         link.href=err.progressPath;
-        link.target='_blank';
-        link.rel='noopener';
-        link.textContent='Check this upload';
+        link.textContent='Open upload progress';
         error.append(' ',link);
       }
-      if (widget!==undefined) window.turnstile.reset(widget);
-    } finally {
       token='';
-      reading=false;
-      read.innerHTML=icon('shield')+'Verify &amp; read menu';
-      if (dialog.open) $('.modal-close',dialog).disabled=false;
+      busy=false;
+      back.disabled=false;
+      button.innerHTML=icon('sparkles')+' Generate &amp; publish';
       sync();
+      if (widget!==undefined) window.turnstile.reset(widget);
     }
   };
-}
-
-function reviewStep() {
-  const limit=state.config?.maxDishes || 100;
-  flow.insertAdjacentHTML('beforeend',`
-    <h2>Review the original details</h2><p class="muted">Check each name, description and price against the source. Leave a price blank if one wasn’t printed.</p>
-    <button type="button" class="btn quiet small" id="copy-draft-link">${icon('link')} Copy return link</button>
-    <div class="fields">
-      ${state.warnings.length ? notice(state.warnings.join(' ')) : ''}
-      <div class="review-grid"><ol id="dish-editors"></ol><aside class="source-pages" aria-label="Uploaded photos">
-      ${state.files.map((file,i)=>`<a href="${file.url}" target="_blank" rel="noopener"><img src="${file.url}" alt="Open uploaded menu page ${i+1}"></a>`).join('')}</aside></div>
-      <div><button type="button" class="btn quiet small" id="add-dish">${icon('plus')} Add dish</button></div>
-      <label class="field">Menu notes <textarea class="control" id="notes" rows="2" maxlength="9000">${escape(state.notes)}</textarea></label>
-      <details class="panel menu-details"><summary>Review full original menu text</summary>
-        <label class="field">Original menu text <textarea class="control" id="transcript" rows="7" maxlength="65000">${escape(state.transcript)}</textarea></label>
-      </details>
-      <label class="checkbox"><input id="reviewed" type="checkbox">I’ve checked the dishes and prices and removed any personal information.</label>
-      <p class="field-hint">After you submit, you can close this page. Your menu will publish here when every dish image is ready.</p>
-      <p class="error" id="review-error" role="alert" hidden></p>
-      <div class="form-actions"><button type="button" class="btn text back" id="review-back">${icon('back')} Restaurant</button>
-      ${primary('Generate &amp; publish','sparkles','id="publish" disabled')}</div>
-    </div>`);
-  const reviewed=$('#reviewed');
-  const publish=$('#publish');
-  $('#copy-draft-link').onclick=()=>share('Return link');
-  const sync=()=>{
-    $('#add-dish').disabled=state.dishes.length>=limit;
-    publish.disabled=!reviewed.checked || !state.dishes.length || state.dishes.length>limit;
-  };
-  const resetReview=()=>{reviewed.checked=false;sync();};
-  function drawDishes() {
-    const dishFields=[['name','Dish name',300],['section','Section',160],['price','Printed price or options',240]];
-    $('#dish-editors').innerHTML=state.dishes.map((dish,i)=>`<li class="review-editor" data-edit-index="${i}">
-      <div class="review-top"><strong>Dish ${i+1}</strong><button type="button" class="icon-button delete-dish" aria-label="Remove dish ${i+1}">${icon('close')}</button></div>
-      ${dishFields.map(([key,label,max])=>`<label class="field">${label}<input class="control" data-key="${key}" maxlength="${max}" value="${escape(dish[key])}"></label>`).join('')}
-      <label class="field">Description<textarea class="control" data-key="description" maxlength="1800" rows="2">${escape(dish.description)}</textarea></label></li>`).join('');
-    sync();
+  await configRequest;
+  if (!form.isConnected) return;
+  if (!state.config?.generation) {
+    errorAt(error,'New menu generation is temporarily unavailable.');
+    return;
   }
-  drawDishes();
-  if (state.dishes.length>limit) errorAt($('#review-error'),`This submission exceeds the ${limit}-dish limit. Start again with fewer pages.`);
-  $('#dish-editors').addEventListener('input',event=>{
-    const element=event.target;
-    const editor=element.closest('[data-edit-index]');
-    if (element.dataset.key && editor) {
-      state.dishes[Number(editor.dataset.editIndex)][element.dataset.key]=element.value;
-      resetReview();
-    }
-  });
-  $('#dish-editors').addEventListener('click',event=>{
-    const button=event.target.closest('.delete-dish');
-    if (!button) return;
-    const i=Number(button.closest('[data-edit-index]').dataset.editIndex);
-    state.dishes.splice(i,1);
-    drawDishes();
-    resetReview();
-    ($('.delete-dish',flow) || $('#add-dish')).focus();
-  });
-  $('#add-dish').onclick=()=>{
-    state.dishes.push({name:'',section:'',description:'',price:''});
-    drawDishes();
-    resetReview();
-    $('#dish-editors li:last-child input').focus();
-  };
-  $('#notes').oninput=event=>{state.notes=event.target.value;resetReview();};
-  $('#transcript').oninput=event=>{state.transcript=event.target.value;resetReview();};
-  reviewed.onchange=sync;
-  $('#review-back').onclick=()=>go(2);
-  publish.onclick=async()=>{
-    const firstInvalid=state.dishes.findIndex(dish=>!dish.name.trim());
-    if (firstInvalid>=0) {
-      errorAt($('#review-error'),`Dish ${firstInvalid+1} needs a name.`);
-      $(`[data-edit-index="${firstInvalid}"] input`,flow).focus();
-      return;
-    }
-    publish.disabled=true;
-    $('#review-back').disabled=true;
-    errorAt($('#review-error'),'');
-    try {
-      const result=await api('/jobs/'+state.submissionId+'/publish',{reviewed:reviewed.checked,
-        dishes:state.dishes,notes:state.notes,transcript:state.transcript});
-      location.replace('/menu/'+result.id);
-    } catch(error) {
-      if (error.status===403) {
-        state.verified=false;
-        go(2);
-        errorAt($('#step-error'),error.message);
-      } else {
-        errorAt($('#review-error'),error.message);
-      }
-    } finally {
-      publish.disabled=false;
-      const back=$('#review-back');
-      if (back) back.disabled=false;
-    }
-  };
+  try {
+    await loadTurnstile();
+    if (!form.isConnected) return;
+    widget=window.turnstile.render(target,{
+      sitekey:state.config.siteKey,action:'menu_submit',theme:getComputedStyle(document.documentElement).colorScheme==='dark'?'dark':'light',
+      size:matchMedia('(max-width: 375px)').matches?'compact':'normal',
+      callback:value=>{token=value;sync();},
+      'expired-callback':()=>{token='';sync();},
+      'error-callback':()=>{token='';sync();errorAt(error,'The human check failed to load. Please try again.');},
+    });
+  } catch(err) {if (form.isConnected) errorAt(error,err.message);}
 }
 
-const labels={waiting:'Waiting to read',reading:'Reading the menu',review:'Ready to review',
+const labels={waiting:'Waiting to read',reading:'Reading the menu',review:'Ready to generate',
   uploading:'Uploading photos',already_illustrated:'Every dish already has a photo',read_error:'Menu reading stopped',queued:'Waiting for illustrations',running:'Illustrating dishes',
   error:'Images need attention',complete:'Published'};
 const imageCount=job=>`${job.completed} of ${job.total} dish images ready`;
@@ -874,23 +739,6 @@ async function openSubmission(id) {
   if (!$('#job-opening')) page('Opening your menu','MENU LENS','','',back);
   watchJob(id,async job=>{
     if (job.state==='complete') return showMenu(id);
-    if (job.state==='review') {
-      const output=await api(path+'/review');
-      const {restaurant,date}=job;
-      Object.assign(state,{step:3,submissionId:id,name:restaurant.name,address:restaurant.address,date,
-        place:restaurant.placeId ? {id:restaurant.placeId,...restaurant.pin} : null, manualPin:pinText(restaurant.pin),
-        confirmed:true,read:true,verified:true,dishes:output.dishes,transcript:output.transcript,
-        notes:output.notes,warnings:output.warnings,files:Array.from({length:output.photoCount},(_,i)=>({
-          name:'Menu page '+(i+1),url:'/api'+path+'/photos/'+i,
-        }))});
-      page(escape(job.name),'MENU REVIEW','Your menu is ready to check. Review it within 24 hours of uploading.',
-        '<section class="panel review-panel" id="flow"></section>',back);
-      document.title='Review '+job.name+' · Menu Lens';
-      flow=$('#flow');
-      renderStep();
-      api('/config').then(config=>{state.config=config;if(state.step===2) updateLocation();}).catch(()=>{});
-      return;
-    }
     const images=Number.isInteger(job.total);
     const active=liveStates.has(job.state);
     const publishing=job.state==='running' && job.completed===job.total;
@@ -899,22 +747,24 @@ async function openSubmission(id) {
       uploading:'Keep the upload page open until your photos have been received.',
       waiting:'Your photos are saved. Reading will start when the previous menu finishes.',
       reading:job.transcribing?'Checking dish names, prices and which dishes already have photos.':'Retrieving your photos for menu reading.',
-      queued:'Your reviewed menu is in the illustration queue.',
+      review:'This saved draft is private. Generate and publish it to share the dishes, prices and original photos.',
+      queued:'Your menu is in the illustration queue.',
       running:job.illustrating?.length ? 'Working on '+job.illustrating.join(' and ')+'.' : 'Preparing the next illustrations for your menu.',
       error:'Generation stopped before all the images were ready. Completed illustrations have been saved.',
     };
     const message=publishing?'All dish images are ready.':job.error || messages[job.state] || '';
     if (!$('#job-panel')) {
       page(escape(job.name),'MENU SUBMISSION','',`<section class="panel progress-panel" id="job-panel">
-        <ol class="job-stages" aria-label="Menu progress">${['Read menu','Review','Illustrate','Publish'].map(label=>`<li><span></span>${label}</li>`).join('')}</ol>
+        <ol class="job-stages" aria-label="Menu progress">${['Read menu','Illustrate','Publish'].map(label=>`<li><span></span>${label}</li>`).join('')}</ol>
         <div aria-live="polite" aria-atomic="true"><h2 id="job-title"></h2><p id="job-message" class="muted"></p><strong id="image-count"></strong></div>
         <progress id="job-meter" class="progress" aria-label="Menu progress"></progress>
         <p class="field-hint" id="job-return"></p><p class="error" id="job-error" role="status" hidden></p>
         <div class="inline-actions"><button class="btn quiet" id="save-link">${icon('link')} Copy return link</button>
+        ${primary('Generate &amp; publish','sparkles','id="generate-draft" hidden')}
         ${primary('Retry remaining images','sparkles','id="retry" hidden')}<a class="btn primary" href="/create" id="new-upload" hidden>Upload another menu</a></div></section>`,back);
       $('#save-link').onclick=()=>share('Return link');
     }
-    const step=publishing?3:images?2:0;
+    const step=publishing?2:images?1:0;
     document.querySelectorAll('.job-stages li').forEach((el,i)=>{
       el.classList.toggle('past',i<step);
       el.classList.toggle('stopped',i===step && !active);
@@ -926,11 +776,20 @@ async function openSubmission(id) {
     const meter=$('#job-meter');
     meter.hidden=!active && !images;
     if (images) {meter.max=job.total;meter.value=job.completed;} else meter.removeAttribute('value');
-    $('#job-return').textContent=active && job.state!=='uploading' ? (images?'Copy this link before closing the page. Your finished menu will appear here.':'Copy this link before closing the page. Open it in the same browser to review your menu.') : '';
+    $('#job-return').textContent=active && job.state!=='uploading' ? 'You can close this page. Save the link to return to your menu.' : '';
     if (job.state==='read_error' && job.pageCount) {
       const until=new Date(job.expires).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
       $('#job-return').textContent=`Your photos are private until ${until}. `+(job.canRetryRead?'You can retry with these photos.':'This draft has used all three reading attempts.');
     }
+    const generate=$('#generate-draft');
+    generate.hidden=job.state!=='review';
+    generate.onclick=async()=>{
+      generate.disabled=true;
+      try {
+        await api(path+'/publish',{useTranscription:true});
+        void openSubmission(id);
+      } catch(error) {errorAt($('#job-error'),error.message);generate.disabled=false;}
+    };
     const retry=$('#retry');
     retry.hidden=!job.canRetry && !job.canRetryRead;
     retry.textContent=job.canRetryRead?'Retry reading menu':'Retry remaining images';

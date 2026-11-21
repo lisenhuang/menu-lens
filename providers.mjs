@@ -49,7 +49,7 @@ async function openAI(path, body, timeout, received) {
     const code=details.error?.code;
     console.warn('OpenAI request failed',path,response.status,typeof code==='string' && /^[\w-]+$/.test(code)?code:'');
     if (response.status===400 && details.error?.type==='image_generation_user_error') {
-      throw new RequestError(422,'One of the dish images could not be generated from the reviewed menu.');
+      throw new RequestError(422,'One of the dish images could not be generated from the menu.');
     }
     throw new RequestError(502,'The AI service could not complete this request. Please try again later.');
   } catch(error) {

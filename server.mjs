@@ -283,7 +283,7 @@ function details(body) {
     }
     restaurant.pin={lat,lng};
   }
-  return {restaurant,date,shareOriginals:body.shareOriginals===true,consentAt:new Date().toISOString()};
+  return {restaurant,date,autoPublish:body.autoPublish===true,shareOriginals:body.shareOriginals===true,consentAt:new Date().toISOString()};
 }
 
 function menuText(body) {
@@ -326,7 +326,7 @@ async function readDrafts() {
   readingDrafts = true;
   try {
     let draft;
-    while ((draft=db.prepare(`SELECT drafts.id, drafts.pages, drafts.read_ip FROM drafts JOIN sessions ON sessions.id=drafts.owner
+    while ((draft=db.prepare(`SELECT drafts.*, sessions.details FROM drafts JOIN sessions ON sessions.id=drafts.owner
       WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
       db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
       notifyProgress(draft.id);
@@ -339,8 +339,12 @@ async function readDrafts() {
           discardIllustratedDraft(draft,'Every dish on this menu already has a photo. No dish illustrations were generated.');
           continue;
         }
-        db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
-        notifyProgress(draft.id);
+        if (JSON.parse(draft.details).autoPublish) {
+          enqueueMenu(draft,output,draft.read_ip);
+        } else {
+          db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
+          notifyProgress(draft.id);
+        }
       } catch (error) {
         const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
         db.prepare("UPDATE drafts SET state='read_error',error=? WHERE id=?").run(message,draft.id);
@@ -438,15 +442,20 @@ function validatePages(body) {
   ))) throw new RequestError(400,'Upload between one and six readable menu photos.');
 }
 // Reserve queue capacity and an attempt together with the draft state change.
-function reserveRead(owner) {
+function reserveRead(owner,autoPublish) {
   const outstanding=db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('uploading','waiting','reading')").get().count;
   if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
+  if (autoPublish) checkImageQueue();
   const reserved=db.prepare('UPDATE sessions SET reads=reads+1 WHERE id=? AND reads<? AND expires>?').run(owner,maxReadAttempts,Date.now());
   if (!reserved.changes) throw new RequestError(429,'This draft has reached its reading limit or expired.');
   if (!rate('reading:daily',45,86_400_000)) throw new RequestError(429,'Today’s reading capacity has been reached. Please try again later.');
 }
 function checkImageQueue() {
-  const outstanding = db.prepare("SELECT count(*) AS count FROM menus WHERE state IN ('queued','running')").get().count;
+  // Automatic submissions reserve an image slot before paying for transcription.
+  const outstanding=db.prepare(`SELECT
+    (SELECT count(*) FROM menus WHERE state IN ('queued','running')) +
+    (SELECT count(*) FROM drafts JOIN sessions ON sessions.id=drafts.owner
+      WHERE drafts.state IN ('uploading','waiting','reading') AND json_extract(details,'$.autoPublish')=1) AS count`).get().count;
   if (outstanding>=pendingLimit) throw new RequestError(429,'The image queue is full. Please try again in a few minutes.');
 }
 async function publish(req,res,id,owner) {
@@ -454,25 +463,27 @@ async function publish(req,res,id,owner) {
   if (existing) return write(res,202,existing);
   limit(req,'publish',5,86_400);
   const body = await json(req);
-  if (body.reviewed !== true) throw new RequestError(403,'Review the original menu information before publishing.');
-  const {date,restaurant,consentAt,shareOriginals} = JSON.parse(owner.details);
-  const {model,quality} = settings();
-  const payload = {...menuText(body),restaurant,consentAt,imageSettings:{model,quality}};
   const duplicate = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
   if (duplicate) return write(res,202,duplicate);
-  const draft=db.prepare('SELECT pages,state FROM drafts WHERE id=? AND owner=?').get(id,owner.id);
-  if (draft?.state!=='review') {
-    throw new RequestError(403,'Read the uploaded menu before publishing.');
-  }
-  payload.originals=shareOriginals ? JSON.parse(draft.pages) : [];
+  const draft=db.prepare('SELECT * FROM drafts WHERE id=? AND owner=?').get(id,owner.id);
+  if (draft?.state!=='review') throw new RequestError(403,'Read the uploaded menu before publishing.');
+  if (body.useTranscription!==true && body.reviewed!==true) throw new RequestError(403,'Choose Generate & publish to share this draft.');
   checkImageQueue();
+  enqueueMenu({...draft,details:owner.details},body.useTranscription===true ? JSON.parse(draft.result) : body,clientIp(req));
+  return write(res,202,{id});
+}
+function enqueueMenu(draft,output,requestIp) {
+  const {id,owner}=draft;
+  const {date,restaurant,consentAt,shareOriginals}=JSON.parse(draft.details);
+  const {model,quality}=settings();
+  const payload={...menuText(output),restaurant,consentAt,imageSettings:{model,quality},
+    originals:shareOriginals ? JSON.parse(draft.pages) : []};
   db.exec('BEGIN');
   try {
     db.prepare("INSERT INTO menus (id,owner,restaurant_key,date,created,payload,state) VALUES (?,?,?,?,?,?,'queued')")
-      .run(id,owner.id,restaurant.key,date,new Date().toISOString(),JSON.stringify(payload));
-    history.register(id,restaurant.name,clientIp(req));
-    history.imageRequester(id,clientIp(req));
-    db.prepare('DELETE FROM drafts WHERE owner=?').run(owner.id);
+      .run(id,owner,restaurant.key,date,new Date().toISOString(),JSON.stringify(payload));
+    history.imageRequester(id,requestIp);
+    db.prepare('DELETE FROM drafts WHERE id=?').run(id);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -480,7 +491,6 @@ async function publish(req,res,id,owner) {
   }
   notifyProgress(id);
   queue();
-  return write(res,202,{id});
 }
 function retryImages(req,res,id,owner) {
   limit(req,'retry',6,600);
@@ -497,21 +507,23 @@ async function submitPages(req,id,owner,body) {
   const existing=db.prepare('SELECT state FROM drafts WHERE id=? UNION ALL SELECT state FROM menus WHERE id=?').get(id,id);
   if (existing?.state==='uploading') throw new RequestError(409,'Your upload is still in progress.');
   if (existing) return;
-  if (!JSON.parse(owner.details).shareOriginals) throw new RequestError(403,'Start a new submission to confirm sharing the original photos.');
+  const {autoPublish,shareOriginals,restaurant}=JSON.parse(owner.details);
+  if (!shareOriginals) throw new RequestError(403,'Start a new submission to confirm sharing the original photos.');
   validatePages(body);
   const prefix='originals/'+randomBytes(16).toString('hex')+'/';
   const keys=body.pages.map((_,i)=>prefix+i+'.jpg');
   db.exec('BEGIN IMMEDIATE');
   try {
-    reserveRead(owner.id);
-    db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'uploading',?)").run(id,owner.id,JSON.stringify(keys));
+    reserveRead(owner.id,autoPublish);
+    if (autoPublish) limit(req,'publish',5,86_400);
+    db.prepare("INSERT INTO drafts (id,owner,state,pages,read_ip) VALUES (?,?,'uploading',?,?)").run(id,owner.id,JSON.stringify(keys),clientIp(req));
     db.exec('COMMIT');
   } catch(error) {db.exec('ROLLBACK');throw error;}
   try {
     for (const [i,page] of body.pages.entries()) {
       await putObject(keys[i],Buffer.from(page.split(',')[1],'base64'),'image/jpeg');
     }
-    history.register(id,JSON.parse(owner.details).restaurant.name,clientIp(req));
+    history.register(id,restaurant.name,clientIp(req));
     db.prepare("UPDATE drafts SET state='waiting' WHERE id=?").run(id);
     notifyProgress(id);
   } catch(error) {
@@ -531,7 +543,7 @@ async function retryReading(req,res,id,owner) {
     // A repeated request for an older attempt must never start another paid read.
     if (attempt===draft.reads) {
       if (draft.state!=='read_error' || !draft.pageCount) throw new RequestError(409,'This draft has no failed read with saved photos to retry.');
-      reserveRead(owner);
+      reserveRead(owner,JSON.parse(draft.details).autoPublish);
       db.prepare("UPDATE drafts SET state='waiting',error=NULL,read_ip=? WHERE id=?").run(clientIp(req),id);
     }
     db.exec('COMMIT');
@@ -659,7 +671,7 @@ async function api(req,res,path) {
     limit(req,'verify',12,3600);
     const body = await json(req,6000);
     if (body.shareOriginals !== true) throw new RequestError(403,'Refresh the page and agree to share the original menu photos.');
-    if (body.consent !== true || body.locationConfirmed !== true) throw new RequestError(403,'Confirm the location and agree to publish before continuing.');
+    if (body.consent !== true) throw new RequestError(403,'Agree to publish the menu before continuing.');
     const info = details(body);
     await verifyPerson(body.token,clientIp(req));
     const token = randomBytes(32).toString('hex');
@@ -677,6 +689,7 @@ async function api(req,res,path) {
     const body = await json(req,16_000_000);
     const id=submissionId(owner.id);
     await submitPages(req,id,owner,body);
+    if (JSON.parse(owner.details).autoPublish) return write(res,202,{id});
     for (let attempt=0;attempt<300;attempt++) {
       const draft=db.prepare('SELECT state,result,error FROM drafts WHERE id=?').get(id);
       if (draft?.state==='review') return write(res,200,JSON.parse(draft.result));
