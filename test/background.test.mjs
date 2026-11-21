@@ -10,7 +10,7 @@ import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const menu={isMenu:true,transcript:'Soup $9',notes:'',warnings:[],dishes:[
-  {name:'Soup',price:'$9',section:'Lunch',description:''},
+  {hasDishPhoto:false,name:'Soup',price:'$9',section:'Lunch',description:''},
 ]};
 const photo='data:image/jpeg;base64,/9j/2Q==';
 const webpFixture=Buffer.from('RIFF0000WEBPfixture').toString('base64');
@@ -21,6 +21,8 @@ test('private uploads and approved illustrations finish with no client connected
   const salt=randomBytes(16);
   const verifier=salt.toString('hex')+':'+scryptSync(pin,salt,32,{N:32768,r:8,p:1,maxmem:64*1024*1024}).toString('hex');
   const usedChallenges=new Set();
+  const objects=new Map();
+  let visionResult=menu;
   let readingRequest,imageRequest;
   let imageFails=true;
   let holdImages=true;
@@ -28,8 +30,17 @@ test('private uploads and approved illustrations finish with no client connected
   let imageCalls=0;
   let readCalls=0;
   const provider=createServer(async (req,res)=>{
-    let body='';
-    for await (const chunk of req) body+=chunk;
+    const chunks=[];
+    for await (const chunk of req) chunks.push(chunk);
+    const bytes=Buffer.concat(chunks);
+    if (req.url.startsWith('/__storage/')) {
+      assert.equal(req.headers.authorization,'Bearer test-storage');
+      if (req.method==='PUT') objects.set(req.url,bytes);
+      if (req.method==='DELETE') objects.delete(req.url);
+      if (['GET','HEAD'].includes(req.method) && !objects.has(req.url)) res.statusCode=404;
+      return res.end(req.method==='GET' ? objects.get(req.url) : undefined);
+    }
+    const body=bytes.toString();
     let response;
     if (req.url==='/turnstile/v0/siteverify') {
       const token=new URLSearchParams(body).get('response');
@@ -40,7 +51,7 @@ test('private uploads and approved illustrations finish with no client connected
       readingRequest=JSON.parse(body);
       readCalls++;
       while (holdRead && !res.destroyed) await delay(10);
-      response={status:'completed',usage:{input_tokens:400,input_tokens_details:{cached_tokens:80},output_tokens:95},output:[{content:[{type:'output_text',text:JSON.stringify(menu)}]}]};
+      response={status:'completed',usage:{input_tokens:400,input_tokens_details:{cached_tokens:80},output_tokens:95},output:[{content:[{type:'output_text',text:JSON.stringify(visionResult)}]}]};
     } else if (req.url==='/v1/images/generations') {
       imageRequest=JSON.parse(body);
       imageCalls++;
@@ -86,7 +97,7 @@ test('private uploads and approved illustrations finish with no client connected
       new URL(new URL(url).pathname,'http://127.0.0.1:${providerPort}'),options);`;
     child=fork(new URL('../server.mjs',import.meta.url),[],{
       silent:true,execArgv:['--import','data:text/javascript,'+encodeURIComponent(preload)],
-      env:{...process.env,OPENAI_IMAGE_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
+      env:{...process.env,R2_GATEWAY_URL:'http://localhost/__storage/',R2_GATEWAY_SECRET:'test-storage',OPENAI_IMAGE_MODEL:'',HOST:'127.0.0.1',PORT:String(port),DATA_DIR:dir,PUBLIC_ORIGIN:origin,
         OPENAI_API_KEY:'test',TURNSTILE_SECRET:'test',TURNSTILE_SITE_KEY:'test',TURNSTILE_HOSTNAME:'localhost',TURNSTILE_TEST:'0',ADMIN_PIN_VERIFIER:verifier,TRUST_CLOUDFLARE:'1'},
     });
     await until(()=>fetch(origin+'/healthz').then(r=>r.ok).catch(()=>false));
@@ -97,7 +108,7 @@ test('private uploads and approved illustrations finish with no client connected
   }
   async function verify(name) {
     const r=await request('/api/verify','',{name,address:'Example Street',date:'2025-01-01',
-      locationConfirmed:true,consent:true,token:'test'});
+      locationConfirmed:true,consent:true,shareOriginals:true,token:'test'});
     assert.equal(r.status,200);
     const {id}=await r.json();
     const cookie=r.headers.getSetCookie().find(value=>value.startsWith('ml_job=')).split(';')[0];
@@ -122,8 +133,8 @@ test('private uploads and approved illustrations finish with no client connected
   const admin=cookie.split(';')[0];
   assert.equal((await login({pin,token:'admin-valid'})).status,403);
   const defaults=await (await request(settingsPath,admin)).json();
-  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'medium',reasoning:'high'});
-  assert.equal(defaults.imageModels[defaults.settings.model].medium*defaults.outputUsdPerMillion/1e6,0.04347);
+  assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'high',reasoning:'high'});
+  assert.equal(defaults.imageModels[defaults.settings.model].high*defaults.outputUsdPerMillion/1e6,0.05268);
   assert.equal((await request(settingsPath,admin,{...newSettings,model:'gpt-image-2'})).status,400);
   assert.equal((await request(settingsPath,admin,newSettings)).status,200);
   const first=await verify('Test kitchen');
@@ -140,6 +151,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.deepEqual((await (await request(settingsPath,admin)).json()).settings,newSettings);
   const second=await verify('Second kitchen');
   assert.equal((await request(api,second.cookie)).status,404);
+  assert.equal((await request('/originals/'+first.id+'/0.jpg')).status,404);
   assert.equal((await request(api+'/photos/0')).status,404);
   assert.equal((await request(api+'/photos/0',first.cookie)).headers.get('content-type'),'image/jpeg');
   assert.deepEqual((await (await request(api+'/review',first.cookie)).json()).dishes,menu.dishes);
@@ -191,6 +203,24 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal((await request('/api/admin/history/'+first.id)).status,401);
   assert.ok(!JSON.stringify(result).includes('192.0.2.45') && !JSON.stringify(result).includes('2001:db8::7'));
   assert.equal(result.dishes[0].price,'$9');
+  assert.equal(result.transcript,undefined);
+  assert.deepEqual(result.originals,['/originals/'+first.id+'/0.jpg']);
+  assert.deepEqual(Buffer.from(await (await request(result.originals[0])).arrayBuffer()),Buffer.from(photo.split(',')[1],'base64'));
   assert.equal((await request(result.dishes[0].image)).headers.get('content-type'),'image/webp');
   assert.equal((await (await request('/api/menus')).json()).length,1);
+  const imagesBefore=imageCalls;
+  visionResult={...menu,dishes:menu.dishes.map(d=>({...d,hasDishPhoto:true}))};
+  const maxObjects=objects.size;
+  const illustrated='/api/jobs/'+second.id;
+  assert.equal((await request(illustrated+'/upload',second.cookie,{pages:[photo]})).status,202);
+  await until(async()=> (await (await request(illustrated,second.cookie)).json()).state==='already_illustrated');
+  assert.equal((await request(illustrated+'/publish',second.cookie,{...menu,reviewed:true})).status,403);
+  await until(()=>objects.size===maxObjects);
+  assert.equal(imageCalls,imagesBefore);
+  visionResult={...menu,dishes:[...visionResult.dishes,{...menu.dishes[0],name:'Bread',hasDishPhoto:false}]};
+  const mixed=await verify('Mixed photos');
+  const mixedPath='/api/jobs/'+mixed.id;
+  assert.equal((await request(mixedPath+'/upload',mixed.cookie,{pages:[photo,photo]})).status,202);
+  await until(async()=> (await (await request(mixedPath,mixed.cookie)).json()).state==='review');
+  assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);
 });

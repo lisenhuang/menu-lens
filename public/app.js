@@ -187,10 +187,16 @@ async function showMenu(id) {
     ${sections.length>1 ? `<nav aria-label="Menu sections" class="menu-jumps">${sections.map((section,i)=>`<a href="#section-${i}">${escape(section || 'Menu')}</a>`).join('')}</nav>` : ''}
     ${sections.map((section,i)=>`<section class="menu-section" id="section-${i}"><h2>${escape(section || 'Menu')}</h2><div class="dish-grid">${menu.dishes.filter(dish=>dish.section===section).map(dishCard).join('')}</div></section>`).join('')}
     ${menu.notes ? `<div class="panel menu-details"><h3>Notes from the menu</h3><p>${escape(menu.notes)}</p></div>` : ''}
-    ${menu.transcript ? `<details class="panel menu-details"><summary>Original menu text</summary><p>${escape(menu.transcript)}</p></details>` : ''}
+    ${menu.originals?.length ? `<details class="panel menu-details" id="original-menu"><summary>Original menu <small>· ${menu.originals.length} ${menu.originals.length===1?'page':'pages'}</small></summary><div class="original-pages"></div></details>` : ''}
     ${dates ? `<div class="panel menu-details"><h3>Other menus for this restaurant</h3><ul>${dates}</ul></div>` : ''}
     <a href="/create" class="btn quiet">${icon('plus')} Add a newer menu</a>
     </div>`;
+  const originals=$('#original-menu');
+  originals?.addEventListener('toggle',()=>{
+    if (!originals.open || originals.querySelector('img')) return;
+    $('.original-pages',originals).innerHTML=menu.originals.map((url,i)=>
+      `<a href="${escape(url)}" target="_blank" rel="noopener"><img src="${escape(url)}" loading="lazy" alt="Original menu page ${i+1} from ${escape(menu.restaurant.name)}"><span>Open page ${i+1} ${icon('external')}</span></a>`).join('');
+  });
   $('#share').addEventListener('click',()=>share());
   if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView();
 }
@@ -199,9 +205,9 @@ function privacy() {
   document.title = 'Privacy & submissions · Menu Lens';
   page('Privacy & submissions','MENU LENS','What happens to your menu photo and location.',
     `<div class="panel privacy">
-      <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, reviewed original text, and AI dish images. It can be browsed or shared by link.</p>
+      <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, reviewed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Review and remove private details before submitting.</p>
-      <p>The original uploaded photo is used to read the menu with OpenAI and is kept out of the public page. Menu Lens keeps the photos privately for your review. They are removed when you submit the reviewed menu or when the draft expires after 24 hours.</p>
+      <p>OpenAI reads your menu photos. A draft is private for up to 24 hours. When you publish, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
       <p>Your browser remembers links to recent submissions on this device. Before you approve a menu, only the browser that uploaded it can reopen the draft.</p>
       <p>Menu Lens stores the requesting IP address alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
@@ -223,7 +229,7 @@ function buildFlow() {
       <aside class="panel side-panel"><h3>Before you upload</h3><ul>
       <li>${icon('camera')} <span>Capture the page straight on and check that prices are readable.</span></li>
       <li>${icon('pin')} <span>Use the address of the exact restaurant branch.</span></li>
-      <li>${icon('globe')} <span>Finished menus are public. The uploaded photos and your GPS position stay off the public page.</span></li>
+      <li>${icon('globe')} <span>Finished menus include your original menu photos. Your GPS location stays private.</span></li>
       </ul></aside></div>`);
   flow = $('#flow');
   renderStep();
@@ -254,7 +260,7 @@ function errorAt(element,message) {
 
 function uploadStep() {
   flow.insertAdjacentHTML('beforeend',`
-    <h2>Upload menu photos</h2><p class="muted">Add all the pages you’d like to include.</p>
+    <h2>Upload menu photos</h2><p class="muted">Choose a menu where at least one dish is missing a photo. Your original pages will be kept and shared when you publish.</p>
     <div class="dropzone" id="drop-zone">${icon('upload')}<strong>Drop your menu photos here</strong><small>Up to 6 JPG, PNG, WebP or HEIC images</small>
     <div class="inline-actions"><button type="button" class="btn primary" id="choose">${icon('plus')} Choose photos</button>
     <button type="button" class="btn quiet" id="camera">${icon('camera')} Take photo</button></div>
@@ -544,8 +550,8 @@ function consentModal() {
   const ready=state.config?.generation;
   showModal('Share this menu publicly','globe',`
     <p>To generate this menu, you must agree to publish it. The finished page will show <strong>${escape(state.name)}</strong>, the branch address, the menu date, reviewed text and AI dish images. Anyone can open and share the link.</p>
-    <p>OpenAI reads the uploaded photos. Your photos and GPS stay off the published page. Menu Lens records the requesting IP address in its private generation history.</p>
-    <label class="checkbox"><input type="checkbox" id="consent">I agree to publish this menu and the restaurant details.</label>
+    <p>OpenAI checks the photos first. If every dish already has a photo, generation stops. Otherwise, the photos you submit will be kept and shared in the Original menu section when you publish. Your GPS stays private. Menu Lens records the requesting IP address in its private generation history.</p>
+    <label class="checkbox"><input type="checkbox" id="consent">I agree to publish the restaurant details and my original menu photos.</label>
     ${ready ? '<div id="challenge" aria-label="Human verification"></div>' : notice('New menu generation is temporarily unavailable.')}
     <p class="error" id="verify-error" role="alert" hidden></p>
     <div class="form-actions">${primary('Verify &amp; read menu','shield','id="read-menu" disabled')}</div>`);
@@ -577,7 +583,7 @@ function consentModal() {
     dialog.setAttribute('aria-busy','true');
     try {
       const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,placeId:state.place?.id,
-        locationConfirmed:state.confirmed || !locationCheck().confirm,consent:true,token});
+        locationConfirmed:state.confirmed || !locationCheck().confirm,consent:true,shareOriginals:true,token});
       const pages=await Promise.all(state.files.map(async file=>{
         const blob=file.blob || await fetch(file.url).then(response=>{
           if (!response.ok) throw new Error('Your source photo has expired. Upload the menu again.');
@@ -727,7 +733,7 @@ async function recoverSubmissions() {
   revealReturnLink();
 }
 const labels={waiting:'Waiting to read',reading:'Reading the menu',review:'Ready to review',
-  read_error:'Photos need attention',queued:'Waiting for illustrations',running:'Illustrating dishes',
+  uploading:'Uploading photos',already_illustrated:'Every dish already has a photo',read_error:'Photos need attention',queued:'Waiting for illustrations',running:'Illustrating dishes',
   error:'Images need attention',complete:'Published'};
 async function submissions() {
   document.title='Your submissions · Menu Lens';
@@ -791,12 +797,12 @@ async function openSubmission(id) {
       }
       const signature=JSON.stringify(job);
       if (signature!==previous) {
-        const reading=['waiting','reading'].includes(job.state);
+        const reading=['uploading','waiting','reading'].includes(job.state);
         const active=reading || ['queued','running'].includes(job.state);
         const title=reading ? 'Reading your menu' : labels[job.state];
         const message=reading ? 'You can close this page. Come back in this browser to review the dishes and prices before publishing.' :
           active ? 'You can close this page. Your menu will publish at this link as soon as every dish has an illustration.' :
-          job.state==='read_error' ? job.error : 'Generation stopped before all the images were ready. Completed illustrations have been saved.';
+          ['already_illustrated','read_error'].includes(job.state) ? job.error : 'Generation stopped before all the images were ready. Completed illustrations have been saved.';
         const progress=Number.isInteger(job.total) ? `<progress class="progress" aria-label="Dish images generated" value="${job.completed}" max="${job.total}"></progress>
           <p class="field-hint">${job.completed} of ${job.total} dish images ready</p>` : '';
         page(escape(job.name),'MENU SUBMISSION','',`<section class="panel progress-panel">
@@ -804,7 +810,7 @@ async function openSubmission(id) {
           ${progress}<p class="error" id="job-error" role="status" hidden></p>
           <div class="inline-actions"><button class="btn quiet" id="save-link">${icon('link')} Copy return link</button>
           ${job.canRetry ? primary('Retry remaining images','sparkles','id="retry"') : ''}
-          ${job.state==='read_error' ? '<a class="btn primary" href="/create">Upload new photos</a>' : ''}</div></section>`,back);
+          ${['already_illustrated','read_error'].includes(job.state) ? '<a class="btn primary" href="/create">Upload another menu</a>' : ''}</div></section>`,back);
         document.title=title+' · '+job.name+' · Menu Lens';
         $('#save-link').onclick=()=>share('Return link');
         if (job.canRetry) $('#retry').onclick=async event=>{

@@ -179,7 +179,12 @@ dialog .btn{max-width:100%;white-space:normal}
 .menu-section .dish-card{scroll-margin-top:1rem}
 .menu-details{margin-bottom:1.1rem}
 .menu-details p{white-space:pre-wrap}
-.menu-details summary{font-weight:700}
+.menu-details summary{font-weight:700;cursor:pointer}
+.menu-details summary small{color:var(--muted);font-weight:400}
+.original-pages{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr));gap:1.25rem;margin-top:1rem}
+.original-pages a{display:flex;flex-direction:column;gap:.45rem;align-self:start}
+.original-pages img{display:block;width:100%;height:auto;border-radius:.5rem}
+.original-pages span{display:inline-flex;align-items:center;gap:.4rem}
 .menu-jumps{display:flex;gap:.5rem;flex-wrap:wrap;margin:1.2rem 0 .5rem}
 .menu-jumps a{padding:.3rem .7rem;border-radius:100px;background:var(--soft);font-size:.85rem;font-weight:700}
 .menu-jumps a:hover{background:var(--wash);color:var(--green)}

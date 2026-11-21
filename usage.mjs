@@ -75,7 +75,7 @@ export function generationHistory(db) {
     )
     SELECT p.seq,p.id,p.restaurant,p.recorded,p.upload_ip AS uploadIp,p.image_ip AS imageIp,p.legacy,
       COALESCE(m.state,d.state,'unpublished') AS state,
-      CASE WHEN p.legacy THEN (SELECT count(*) FROM dish_images WHERE menu_id=p.id) END AS savedImages,
+      CASE WHEN p.legacy THEN (SELECT count(*) FROM dish_objects WHERE menu_id=p.id) END AS savedImages,
       CASE WHEN p.legacy THEN json_extract(m.payload,'$.imageSettings') END AS oldSettings,
       count(c.seq) AS attempts,SUM(c.usd) AS usd,count(c.usd) AS priced,
       count(CASE WHEN c.basis='output estimate' THEN 1 END) AS estimates

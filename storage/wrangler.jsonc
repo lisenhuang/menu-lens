@@ -1,0 +1,9 @@
+{
+  "name": "menu-lens-storage",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{"pattern":"menu.9l.nz/__storage/*","zone_name":"9l.nz"}],
+  "r2_buckets": [{"binding":"FILES","bucket_name":"menu-lens"}]
+}

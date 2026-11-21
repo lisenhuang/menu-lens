@@ -8,7 +8,7 @@ if [[ -n "${MENU_ORACLE_IDENTITY:-}" ]]; then
   ssh_args+=(-i "$MENU_ORACLE_IDENTITY")
 fi
 
-COPYFILE_DISABLE=1 tar -C "$root" -czf - Dockerfile .dockerignore public server.mjs providers.mjs admin.mjs usage.mjs |
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$root" -czf - Dockerfile .dockerignore public server.mjs providers.mjs admin.mjs usage.mjs storage.mjs migrate.mjs |
   ssh "${ssh_args[@]}" "$target" '
 set -euo pipefail
 umask 027
@@ -24,18 +24,24 @@ tag=$(basename "$release")
 docker build -t "menu-lens:$tag" "$release"
 docker volume create menu-lens-data >/dev/null
 docker run --rm --user 0 --entrypoint chown -v menu-lens-data:/data "menu-lens:$tag" 1000:1000 /data
-extra=()
+migrate=(docker run --rm --read-only --env-file "$base/private/runtime.env" -v menu-lens-data:/data)
+chmod -R a+rX "$release/public"
+prefix=$("${migrate[@]}" -v "$release/public:/site:ro" "menu-lens:$tag" node migrate.mjs site /site)
+[[ "$prefix" =~ ^site/[a-f0-9]{64}$ ]]
+printf "%s\n" "$prefix" > "$release/r2-site-prefix"
+rm -r "$release/public"
 if [[ -f "$base/nz-restaurants.json" ]]; then
-  extra=(-v "$base/nz-restaurants.json:/maps/nz-restaurants.json:ro" -e NZ_RESTAURANT_INDEX=/maps/nz-restaurants.json)
+  "${migrate[@]}" -v "$base/nz-restaurants.json:/map.json:ro" "menu-lens:$tag" node migrate.mjs map /map.json
 fi
+map_key=$("${migrate[@]}" "menu-lens:$tag" node migrate.mjs map-key)
 old=""
 if docker container inspect menu-lens-web >/dev/null 2>&1; then
   old="menu-lens-web-previous-$tag"
   docker stop --time 12 menu-lens-web >/dev/null
   docker rename menu-lens-web "$old"
 fi
-if docker run -d --name menu-lens-web --network nine-l-nz --restart unless-stopped --read-only     --cap-drop ALL --security-opt no-new-privileges --memory 512m --log-opt max-size=10m --log-opt max-file=3     -p 127.0.0.1:8238:8080 -v menu-lens-data:/data -e PUBLIC_ORIGIN=https://menu.9l.nz     -e TRUST_CLOUDFLARE=1 --env-file "$base/private/runtime.env" "${extra[@]}" "menu-lens:$tag" >/dev/null; then
-  for attempt in $(seq 1 14); do
+if "${migrate[@]}" "menu-lens:$tag" node migrate.mjs copy && docker run -d --name menu-lens-web --network nine-l-nz --restart unless-stopped --read-only     --cap-drop ALL --security-opt no-new-privileges --memory 512m --log-opt max-size=10m --log-opt max-file=3     -p 127.0.0.1:8238:8080 -v menu-lens-data:/data -e PUBLIC_ORIGIN=https://menu.9l.nz     -e TRUST_CLOUDFLARE=1 --env-file "$base/private/runtime.env" -e R2_SITE_PREFIX="$prefix" -e R2_MAP_KEY="$map_key" "menu-lens:$tag" >/dev/null; then
+  for attempt in $(seq 1 40); do
     if curl -fsS http://127.0.0.1:8238/healthz >/dev/null 2>&1 &&
        curl -fsS http://127.0.0.1:8238/api/config | grep -q "\"generation\":true"; then
       printf "%s\n" "$tag" > "$base/current-release.next"

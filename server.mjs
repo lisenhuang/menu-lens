@@ -1,3 +1,5 @@
+import {setTimeout as delay} from 'node:timers/promises';
+import {getObject,putObject,deleteObject,dishKey,objectSchema,objectExists} from './storage.mjs';
 import {createServer} from 'node:http';
 import {createHash, randomBytes} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
@@ -11,11 +13,14 @@ import {imageModels, matchesPin, outputUsdPerMillion, readingEfforts, validateSe
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
-const document = readFileSync(join(publicDir,'index.html'),'utf8');
+const sitePrefix=process.env.R2_SITE_PREFIX;
+if (process.env.NODE_ENV==='production' && !sitePrefix) throw new Error('R2 site prefix is required');
+const siteFile=name=>sitePrefix ? getObject(sitePrefix+'/'+name) : readFileSync(join(publicDir,name));
+const document=(await siteFile('index.html')).toString('utf8');
 const environment = process.env;
 const dataDir = environment.DATA_DIR || join(root,'.local');
 const liveOrigin = (environment.PUBLIC_ORIGIN || '').replace(/\/$/,'');
-const ready = Boolean(environment.OPENAI_API_KEY && environment.TURNSTILE_SITE_KEY && environment.TURNSTILE_SECRET && environment.TURNSTILE_HOSTNAME);
+const ready = Boolean(environment.R2_GATEWAY_URL && environment.R2_GATEWAY_SECRET && environment.OPENAI_API_KEY && environment.TURNSTILE_SITE_KEY && environment.TURNSTILE_SECRET && environment.TURNSTILE_HOSTNAME);
 const maxDishes = 100;
 const dayLimit = Number(environment.DAILY_IMAGE_LIMIT || 120);
 const pepper = randomBytes(24).toString('hex');
@@ -34,14 +39,18 @@ db.exec(`
     state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS published_menus ON menus(state, date DESC, created DESC);
-  CREATE TABLE IF NOT EXISTS dish_images (
-    menu_id TEXT NOT NULL REFERENCES menus(id), position INTEGER NOT NULL, image BLOB NOT NULL,
-    PRIMARY KEY (menu_id, position)
-  );
+  ${objectSchema};
+  CREATE TABLE IF NOT EXISTS object_cleanup (key TEXT PRIMARY KEY);
   CREATE TABLE IF NOT EXISTS drafts (
     id TEXT PRIMARY KEY, owner TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
     state TEXT NOT NULL, pages TEXT NOT NULL, result TEXT, error TEXT
   );
+  CREATE TRIGGER IF NOT EXISTS discard_draft_photos AFTER DELETE ON drafts BEGIN
+    INSERT OR IGNORE INTO object_cleanup SELECT value FROM json_each(OLD.pages)
+      WHERE value LIKE 'originals/%' AND value NOT IN (
+        SELECT value FROM menus, json_each(menus.payload,'$.originals') WHERE menus.id=OLD.id);
+  END;
+  DELETE FROM drafts WHERE state='uploading';
   UPDATE menus SET state='queued' WHERE state='running';
   UPDATE drafts SET state='waiting' WHERE state='reading';
 `);
@@ -57,7 +66,7 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const normalize = value => value.normalize('NFKC').toLocaleLowerCase('en-NZ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function settings() {
   const row = db.prepare('SELECT value FROM generation_settings WHERE id=1').get();
-  return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'medium',reasoning:'high'};
+  return row ? JSON.parse(row.value) : {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-sunburst',quality:'high',reasoning:'high'};
 }
 
 const history = generationHistory(db);
@@ -67,7 +76,7 @@ function readForRun(id,pages) {
   return history.measure(id,'read','Menu transcription',model,reasoning,received=>readMenu(pages,reasoning,received));
 }
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
-const placesData = placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
+const placesData = environment.R2_MAP_KEY ? await getObject(environment.R2_MAP_KEY) : placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
 const nzPlaces = placesData ? JSON.parse(placesData).places.map(place=>({
   ...place, search:normalize(place.name+' '+place.address), nameKey:normalize(place.name),
 })) : [];
@@ -157,7 +166,7 @@ function privateDraft(id, owner) {
 }
 function jobStatus(row, owner) {
   const payload = JSON.parse(row.payload);
-  const completed = db.prepare('SELECT count(*) AS count FROM dish_images WHERE menu_id=?').get(row.id).count;
+  const completed = db.prepare('SELECT count(*) AS count FROM dish_objects WHERE menu_id=?').get(row.id).count;
   return {id:row.id,name:payload.restaurant.name,state:row.state,completed,total:payload.dishes.length,
     canRetry:row.state==='error' && row.owner===owner && row.attempts<3};
 }
@@ -175,7 +184,7 @@ function details(body) {
   const placeId = typeof body.placeId === 'string' && /^[A-Za-z0-9_-]{5,180}$/.test(body.placeId) ? body.placeId : '';
   const addressKey = sha(normalize(name)+'\u0000'+normalize(address)).slice(0,24);
   const restaurant = {name,address,placeId,key:placeId ? sha(placeId).slice(0,24) : addressKey,addressKey};
-  return {restaurant,date,consentAt:new Date().toISOString()};
+  return {restaurant,date,shareOriginals:body.shareOriginals===true,consentAt:new Date().toISOString()};
 }
 
 function menuText(body) {
@@ -198,14 +207,14 @@ function card(row) {
 
 function publicMenu(row) {
   const payload = JSON.parse(row.payload);
-  const {dishes,restaurant,notes,transcript} = payload;
+  const {dishes,restaurant,notes,originals=[]} = payload;
   const versions = db.prepare(`
     SELECT id,date,created FROM menus WHERE state='complete' AND id<>?
       AND (restaurant_key=? OR json_extract(payload,'$.restaurant.addressKey')=?)
     ORDER BY date DESC,created DESC LIMIT 30
   `).all(row.id,restaurant.key,restaurant.addressKey);
   return {
-    ...card(row),notes,transcript,versions,
+    ...card(row),notes,versions,originals:originals.map((_,i)=>`/originals/${row.id}/${i}.jpg`),
     dishes:dishes.map((dish,i)=>({...dish,image:`/media/${row.id}/${i}.webp`})),
   };
 }
@@ -221,18 +230,42 @@ async function readDrafts() {
       WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
       db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
       try {
-        const output = await readForRun(draft.id,JSON.parse(draft.pages));
+        const pages=await Promise.all(JSON.parse(draft.pages).map(async key=>
+          'data:image/jpeg;base64,'+(await getObject(key)).toString('base64')));
+        const output=await readForRun(draft.id,pages);
         if (!output.isMenu) throw new RequestError(422,'These photos could not be recognised as a restaurant menu. Try a clearer photo.');
+        if (output.dishes.length && output.dishes.every(dish=>dish.hasDishPhoto===true)) {
+          finishRead(draft,'already_illustrated','Every dish on this menu already has a photo. No dish illustrations were generated.');
+          continue;
+        }
         db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
       } catch (error) {
         const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
-        db.prepare("UPDATE drafts SET state='read_error', error=?, pages='[]' WHERE id=?").run(message,draft.id);
+        finishRead(draft,'read_error',message);
       }
     }
   } finally {
     readingDrafts = false;
   }
 }
+function finishRead(draft,state,message) {
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT OR IGNORE INTO object_cleanup SELECT value FROM json_each(?)').run(draft.pages);
+    db.prepare("UPDATE drafts SET state=?,error=?,pages='[]' WHERE id=?").run(state,message,draft.id);
+    db.exec('COMMIT');
+  } catch(error) {db.exec('ROLLBACK');throw error;}
+  void cleanObjects();
+}
+async function cleanObjects() {
+  try {
+    for (const {key} of db.prepare('SELECT key FROM object_cleanup').all()) {
+      await deleteObject(key);
+      db.prepare('DELETE FROM object_cleanup WHERE key=?').run(key);
+    }
+  } catch(error) {console.error('Object cleanup deferred',error.name);}
+}
+void cleanObjects();
 function queueReading() {
   void readDrafts().catch(error=>console.error('Menu reading queue failed',error.name));
 }
@@ -247,15 +280,22 @@ async function runQueue() {
       db.prepare("UPDATE menus SET state='running' WHERE id=?").run(row.id);
       const {dishes,imageSettings} = JSON.parse(row.payload);
       const imageConfig = imageSettings || {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium'};
-      const done = new Set(db.prepare('SELECT position FROM dish_images WHERE menu_id=?').all(row.id).map(item=>item.position));
+      const done = new Set(db.prepare('SELECT position FROM dish_objects WHERE menu_id=?').all(row.id).map(item=>item.position));
       const remaining = dishes.map((dish,i)=>({dish,i})).filter(item=>!done.has(item.i));
       try {
         for (let i=0;i<remaining.length;i+=2) {
           const results = await Promise.allSettled(remaining.slice(i,i+2).map(async item=>{
+            const key=dishKey(row.id,item.i);
+            // A restart can land between a successful R2 write and its SQLite checkpoint.
+            if (await objectExists(key)) {
+              db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
+              return;
+            }
             if (!rate('images:daily',dayLimit,86_400_000)) throw new RequestError(429,'Daily image capacity reached.');
             const bytes = await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,
               received=>generateDish(item.dish,imageConfig,received));
-            db.prepare('INSERT INTO dish_images VALUES (?,?,?)').run(row.id,item.i,bytes);
+            await putObject(key,bytes,'image/webp');
+            db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
           }));
           if (results.some(result=>result.status==='rejected')) throw new Error('Image batch unfinished');
         }
@@ -278,8 +318,11 @@ setInterval(()=>{
   db.prepare('DELETE FROM counters WHERE expires<=?').run(now);
   db.prepare('DELETE FROM sessions WHERE expires<=?').run(now);
   const cutoff = new Date(now-604_800_000).toISOString();
-  db.prepare("DELETE FROM dish_images WHERE menu_id IN (SELECT id FROM menus WHERE state='error' AND created<?)").run(cutoff);
+  db.prepare("INSERT OR IGNORE INTO object_cleanup SELECT object_key FROM dish_objects JOIN menus ON menus.id=menu_id WHERE state='error' AND created<?").run(cutoff);
+  db.prepare("INSERT OR IGNORE INTO object_cleanup SELECT value FROM menus,json_each(payload,'$.originals') WHERE state='error' AND created<?").run(cutoff);
+  db.prepare("DELETE FROM dish_objects WHERE menu_id IN (SELECT id FROM menus WHERE state='error' AND created<?)").run(cutoff);
   db.prepare("DELETE FROM menus WHERE state='error' AND created<?").run(cutoff);
+  void cleanObjects();
 },3_600_000).unref();
 
 function validatePages(body) {
@@ -296,20 +339,22 @@ function checkImageQueue() {
   const outstanding = db.prepare("SELECT count(*) AS count FROM menus WHERE state IN ('queued','running')").get().count;
   if (outstanding>=pendingLimit) throw new RequestError(429,'The image queue is full. Please try again in a few minutes.');
 }
-async function publish(req,res,id,owner,fromDraft) {
+async function publish(req,res,id,owner) {
   const existing = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
   if (existing) return write(res,202,existing);
   limit(req,'publish',5,86_400);
   const body = await json(req);
   if (body.reviewed !== true) throw new RequestError(403,'Review the original menu information before publishing.');
-  const {date,restaurant,consentAt} = JSON.parse(owner.details);
+  const {date,restaurant,consentAt,shareOriginals} = JSON.parse(owner.details);
   const {model,quality} = settings();
   const payload = {...menuText(body),restaurant,consentAt,imageSettings:{model,quality}};
   const duplicate = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
   if (duplicate) return write(res,202,duplicate);
-  if (fromDraft ? privateDraft(id,owner.id).state!=='review' : !owner.read_success) {
+  const draft=db.prepare('SELECT pages,state FROM drafts WHERE id=? AND owner=?').get(id,owner.id);
+  if (draft?.state!=='review') {
     throw new RequestError(403,'Read the uploaded menu before publishing.');
   }
+  payload.originals=shareOriginals ? JSON.parse(draft.pages) : [];
   checkImageQueue();
   db.exec('BEGIN');
   try {
@@ -336,6 +381,32 @@ function retryImages(req,res,id,owner) {
   return write(res,202,{ok:true});
 }
 
+async function submitPages(req,id,owner,body) {
+  const existing=db.prepare('SELECT state FROM drafts WHERE id=? UNION ALL SELECT state FROM menus WHERE id=?').get(id,id);
+  if (existing?.state==='uploading') throw new RequestError(409,'Your upload is still in progress.');
+  if (existing) return;
+  if (!JSON.parse(owner.details).shareOriginals) throw new RequestError(403,'Start a new submission to confirm sharing the original photos.');
+  validatePages(body);
+  const outstanding=db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('uploading','waiting','reading')").get().count;
+  if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
+  reserveRead(owner.id);
+  const prefix='originals/'+randomBytes(16).toString('hex')+'/';
+  const keys=body.pages.map((_,i)=>prefix+i+'.jpg');
+  db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'uploading',?)").run(id,owner.id,JSON.stringify(keys));
+  try {
+    for (const [i,page] of body.pages.entries()) {
+      await putObject(keys[i],Buffer.from(page.split(',')[1],'base64'),'image/jpeg');
+    }
+    history.register(id,JSON.parse(owner.details).restaurant.name,clientIp(req));
+    db.prepare("UPDATE drafts SET state='waiting' WHERE id=?").run(id);
+  } catch(error) {
+    db.prepare('DELETE FROM drafts WHERE id=?').run(id);
+    void cleanObjects();
+    throw error;
+  }
+  queueReading();
+}
+
 async function jobApi(req,res,id,action) {
   const owner = jobOwner(req);
   const row = db.prepare('SELECT * FROM menus WHERE id=?').get(id);
@@ -352,7 +423,7 @@ async function jobApi(req,res,id,action) {
     }
     if (/^photos\/[0-5]$/.test(action) && draft.state==='review') {
       const photo = db.prepare('SELECT json_extract(pages,?) AS page FROM drafts WHERE id=?').get('$['+action.slice(7)+']',id).page;
-      if (photo) return write(res,200,Buffer.from(photo.split(',')[1],'base64'),'image/jpeg');
+      if (photo) return write(res,200,await getObject(photo),'image/jpeg');
     }
   } else if (req.method==='POST') {
     if (!ready) throw new RequestError(503,statusText);
@@ -361,22 +432,11 @@ async function jobApi(req,res,id,action) {
     if (row && ['publish','upload'].includes(action)) return write(res,202,{id});
     const active = db.prepare('SELECT * FROM sessions WHERE id=? AND expires>?').get(owner,Date.now());
     if (!active) throw new RequestError(403,'Your upload has expired. Start a new submission.');
-    if (action==='publish') return publish(req,res,id,active,true);
+    if (action==='publish') return publish(req,res,id,active);
     if (action==='upload') {
       limit(req,'read',9,86_400);
       const body = await json(req,16_000_000);
-      if (db.prepare('SELECT id FROM drafts WHERE id=? UNION ALL SELECT id FROM menus WHERE id=?').get(id,id)) return write(res,202,{id});
-      validatePages(body);
-      const outstanding = db.prepare("SELECT count(*) AS count FROM drafts WHERE state IN ('waiting','reading')").get().count;
-      if (outstanding>=pendingLimit) throw new RequestError(429,'The reading queue is full. Please try again in a few minutes.');
-      reserveRead(owner);
-      db.exec('BEGIN');
-      try {
-        db.prepare("INSERT INTO drafts (id,owner,state,pages) VALUES (?,?,'waiting',?)").run(id,owner,JSON.stringify(body.pages));
-        history.register(id,JSON.parse(active.details).restaurant.name,clientIp(req));
-        db.exec('COMMIT');
-      } catch(error) {db.exec('ROLLBACK');throw error;}
-      queueReading();
+      await submitPages(req,id,active,body);
       return write(res,202,{id});
     }
   }
@@ -472,6 +532,7 @@ async function api(req,res,path) {
   if (path === '/api/verify') {
     limit(req,'verify',12,3600);
     const body = await json(req,6000);
+    if (body.shareOriginals !== true) throw new RequestError(403,'Refresh the page and agree to share the original menu photos.');
     if (body.consent !== true || body.locationConfirmed !== true) throw new RequestError(403,'Confirm the location and agree to publish before continuing.');
     const info = details(body);
     await verifyPerson(body.token,clientIp(req));
@@ -488,16 +549,18 @@ async function api(req,res,path) {
   if (path === '/api/read') {
     limit(req,'read',9,86_400);
     const body = await json(req,16_000_000);
-    validatePages(body);
-    reserveRead(owner.id);
     const id=submissionId(owner.id);
-    history.register(id,JSON.parse(owner.details).restaurant.name,clientIp(req));
-    const output = await readForRun(id,body.pages);
-    if (!output.isMenu) throw new RequestError(422,'This does not look like a restaurant menu. Upload clear photos of the menu.');
-    db.prepare('UPDATE sessions SET read_success=1 WHERE id=?').run(owner.id);
-    return write(res,200,output);
+    await submitPages(req,id,owner,body);
+    for (let attempt=0;attempt<300;attempt++) {
+      const draft=db.prepare('SELECT state,result,error FROM drafts WHERE id=?').get(id);
+      if (draft?.state==='review') return write(res,200,JSON.parse(draft.result));
+      if (draft?.error) throw new RequestError(422,draft.error);
+      if (!draft) throw new RequestError(409,'This submission is no longer in review.');
+      await delay(500);
+    }
+    return write(res,202,{id});
   }
-  if (path === '/api/publish') return publish(req,res,submissionId(owner.id),owner,false);
+  if (path === '/api/publish') return publish(req,res,submissionId(owner.id),owner);
   const previous = db.prepare('SELECT id FROM menus WHERE owner=?').get(owner.id);
   if (!previous) throw new RequestError(404,'This menu could not be found.');
   return retryImages(req,res,previous.id,owner.id);
@@ -526,11 +589,17 @@ const server = createServer(async (req,res)=>{
         'Content-Disposition':'attachment; filename="nz-restaurants.json"','Cache-Control':'public, max-age=86400',
       });
     }
+    const original=path.match(/^\/originals\/([a-f0-9]{20})\/([0-5])\.jpg$/);
+    if (original) {
+      const row=db.prepare("SELECT json_extract(payload,?) AS key FROM menus WHERE id=? AND state='complete'").get('$.originals['+original[2]+']',original[1]);
+      if (!row?.key) throw new RequestError(404,'Menu photo not found.');
+      return write(res,200,await getObject(row.key),'image/jpeg',{'Cache-Control':'public, max-age=86400'});
+    }
     const media = path.match(/^\/media\/([a-f0-9]{20})\/(\d{1,3})\.webp$/);
     if (media) {
-      const row = db.prepare("SELECT image FROM dish_images JOIN menus ON menus.id=menu_id WHERE menu_id=? AND position=? AND state='complete'").get(media[1],Number(media[2]));
+      const row = db.prepare("SELECT object_key FROM dish_objects JOIN menus ON menus.id=menu_id WHERE menu_id=? AND position=? AND state='complete'").get(media[1],Number(media[2]));
       if (!row) throw new RequestError(404,'Image not found.');
-      return write(res,200,row.image,mime.webp,{'Cache-Control':'public, max-age=31536000, immutable'});
+      return write(res,200,await getObject(row.object_key),mime.webp,{'Cache-Control':'public, max-age=31536000, immutable'});
     }
     if (path==='/menu/osteria-verde') return write(res,301,'',mime.html,{Location:'/explore'});
     const parts = path.split('/');
@@ -553,9 +622,9 @@ const server = createServer(async (req,res)=>{
       const type = mime[extname(path).slice(1)];
       if (type) {
         try {
-          return write(res,200,readFileSync(join(publicDir,path)),type,{'Cache-Control':path.includes('/images/') || path.includes('/fonts/') ? 'public, max-age=86400' : 'no-cache'});
+          return write(res,200,await siteFile(path.slice(1)),type,{'Cache-Control':path.includes('/images/') || path.includes('/fonts/') ? 'public, max-age=86400' : 'no-cache'});
         } catch (error) {
-          if (error.code!=='ENOENT') throw error;
+          if (error.code!=='ENOENT' && error.statusCode!==404) throw error;
         }
       }
     }
