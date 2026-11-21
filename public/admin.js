@@ -75,11 +75,7 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
         <section class="billing-credit" aria-labelledby="billing-heading"><h2 id="billing-heading">OpenAI credit balance</h2>
           <strong id="credit-value"></strong><p class="field-hint" id="credit-checked"></p>
           <div><a class="text-link" href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Open OpenAI Billing ↗</a></div>
-          <details><summary>Record a balance</summary>
-            <form class="fields" id="billing-form"><label class="field">OpenAI organization<input class="control" name="organization" maxlength="160" required></label>
-              <label class="field">Balance in USD<input class="control" name="usd" type="number" inputmode="decimal" step="0.01" min="-999999999.99" max="999999999.99" required></label>
-              <button class="btn quiet small" type="submit">Save balance</button></form></details>
-          <p id="billing-result" role="status"></p></section>
+        </section>
         <div class="history-heading"><h2 id="history-heading">Generation history</h2><button type="button" id="refresh-history" class="btn quiet small">Refresh</button></div>
         <p class="field-hint">Estimated USD at standard API rates. Open a menu to see each request, including retries.</p>
         <div id="history-list"></div><p id="history-message" role="status"></p>
@@ -134,32 +130,12 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
     showBalance(data.balance);
     showHistory();
   }
-  function showBalance(balance) {
-    const form=document.querySelector('#billing-form'),result=document.querySelector('#billing-result');
-    function display(record) {
-      document.querySelector('#credit-value').textContent=record ?
-        new Intl.NumberFormat('en-NZ',{style:'currency',currency:'USD'}).format(record.cents/100) : 'Awaiting first check';
-      const checked=record && new Date(record.checked).toLocaleString('en-NZ',{dateStyle:'medium',timeStyle:'short',timeZone:'Pacific/Auckland'});
-      document.querySelector('#credit-checked').textContent=record ?
-        `${record.organization} · Manually checked ${checked} (NZ time)` : 'Check your organization’s balance in OpenAI Billing.';
-      form.elements.organization.value=record?.organization || '';
-      form.elements.usd.value='';
-    }
-    display(balance);
-    form.onsubmit=async event=>{
-      event.preventDefault();
-      const button=form.querySelector('button');
-      button.disabled=true;
-      try {
-        const {balance}=await api('/admin/balance',{organization:form.elements.organization.value.trim(),usd:form.elements.usd.value});
-        display(balance);
-        form.closest('details').open=false;
-        result.textContent='Balance recorded.';
-      } catch(error) {
-        if (error.status===401) return login();
-        result.textContent=error.message;
-      } finally {button.disabled=false;}
-    };
+  function showBalance(record) {
+    document.querySelector('#credit-value').textContent=record ?
+      new Intl.NumberFormat('en-NZ',{style:'currency',currency:'USD'}).format(record.cents/100) : 'Awaiting first check';
+    const checked=record && new Date(record.checked).toLocaleString('en-NZ',{dateStyle:'medium',timeStyle:'short',timeZone:'Pacific/Auckland'});
+    document.querySelector('#credit-checked').textContent=record ?
+      `${record.organization} · Manually checked ${checked} (NZ time)` : 'Check your organization’s balance in OpenAI Billing.';
   }
   function showHistory() {
     const list=document.querySelector('#history-list'),more=document.querySelector('#history-more');

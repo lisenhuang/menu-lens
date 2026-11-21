@@ -183,16 +183,9 @@ test('private uploads and approved illustrations finish with no client connected
   assert.match(cookie,/HttpOnly; SameSite=Strict/);
   const admin=cookie.split(';')[0];
   assert.equal((await login({pin,token:'admin-valid'})).status,403);
-  const amount={organization:'Example billing account',usd:'12.34'};
-  assert.equal((await request('/api/admin/balance','',amount)).status,401);
   const defaults=await (await request(settingsPath,admin)).json();
   assert.equal(defaults.balance,null);
-  assert.equal((await request('/api/admin/balance',admin,{...amount,usd:'oops'})).status,400);
-  const recorded=(await (await request('/api/admin/balance',admin,amount)).json()).balance;
-  assert.equal(recorded.cents,1234);
-  assert.equal(recorded.organization,amount.organization);
-  assert.ok(Number.isFinite(Date.parse(recorded.checked)));
-  assert.deepEqual((await (await request(settingsPath,admin)).json()).balance,recorded);
+  assert.equal((await request('/api/admin/balance',admin,{organization:'Example',usd:'12.34'})).status,404);
   assert.equal((await (await request('/api/config')).json()).balance,undefined);
   assert.deepEqual(defaults.settings,{model:'gpt-image-2.6-sunburst',quality:'high',readingModel:'gpt-6.1-terra',reasoning:'medium'});
   assert.equal(defaults.imageModels[defaults.settings.model].high*defaults.outputUsdPerMillion/1e6,0.05268);
@@ -200,7 +193,10 @@ test('private uploads and approved illustrations finish with no client connected
   olderSettings.reasoning='low';
   const previousDatabase=new DatabaseSync(join(dir,'menu.sqlite'));
   previousDatabase.prepare('INSERT INTO generation_settings VALUES (1,?)').run(JSON.stringify(olderSettings));
+  const recorded={cents:1234,organization:'Example billing account',checked:'2026-11-21T01:00:00.000Z'};
+  previousDatabase.prepare('INSERT INTO billing_snapshot VALUES (1,?,?,?)').run(recorded.cents,recorded.organization,recorded.checked);
   previousDatabase.close();
+  assert.deepEqual((await (await request(settingsPath,admin)).json()).balance,recorded);
   assert.deepEqual((await (await request(settingsPath,admin)).json()).settings,{...olderSettings,readingModel:defaultReadingModel});
   assert.equal((await request(settingsPath,admin,{...newSettings,model:'gpt-image-2'})).status,400);
   assert.equal((await request(settingsPath,admin,{...newSettings,readingModel:'invalid'})).status,400);

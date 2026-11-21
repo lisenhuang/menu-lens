@@ -659,17 +659,6 @@ async function adminApi(req,res,path) {
     db.prepare('DELETE FROM admin_sessions WHERE id=?').run(id);
     return write(res,200,{ok:true},undefined,{'Set-Cookie':`ml_admin=${cookieSuffix}; Max-Age=0`});
   }
-  if (path==='/api/admin/balance' && req.method==='POST') {
-    const body=await json(req,1024);
-    const organization=clean(body.organization,160,'Organization');
-    if (!organization || typeof body.usd!=='string' || !/^-?\d{1,9}(?:\.\d{1,2})?$/.test(body.usd)) {
-      throw new RequestError(400,'Enter the organization and its USD balance from OpenAI Billing.');
-    }
-    const balance={cents:Math.round(Number(body.usd)*100),organization,checked:new Date().toISOString()};
-    db.prepare('INSERT OR REPLACE INTO billing_snapshot (id,cents,organization,checked) VALUES (1,?,?,?)')
-      .run(balance.cents,balance.organization,balance.checked);
-    return write(res,200,{balance});
-  }
   if (path==='/api/admin/settings' && req.method==='GET') {
     const current=settings();
     const balance=db.prepare('SELECT cents,organization,checked FROM billing_snapshot WHERE id=1').get() ?? null;

@@ -304,8 +304,3 @@ html:has(#image-viewer[open]){overflow:hidden}
 
 .billing-credit{padding-bottom:1.3rem;margin-bottom:1.4rem;border-bottom:1px solid var(--line)}
 #credit-value{display:block;margin-top:.45rem;color:var(--green);font-size:1.65rem;font-variant-numeric:tabular-nums}
-.billing-credit details{margin-top:.6rem}
-.billing-credit summary{width:fit-content;cursor:pointer;color:var(--muted)}
-.billing-credit form{max-width:24rem;margin-top:.7rem}
-.billing-credit form button{justify-self:start}
-#billing-result:not(:empty){margin-top:.5rem;color:var(--green)}
