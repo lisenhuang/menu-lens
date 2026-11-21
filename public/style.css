@@ -120,6 +120,8 @@ a.dish-card:hover img{transform:scale(1.045)}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:.7rem}
 .field{display:grid;gap:.28rem;font-size:.89rem;font-weight:700;min-width:0}
 .control{width:100%;padding:.63rem .75rem;min-height:45px;border:1px solid var(--line);border-radius:9px;background:var(--bg);font-size:1rem;font-weight:450}
+/* Let the grid size the native date picker, including its padding on iOS. */
+#menu-date{width:auto;min-width:0;justify-self:stretch}
 .control:focus{border-color:var(--green)}
 textarea.control{resize:vertical;min-height:70px}
 .form-actions,.inline-actions{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap}
