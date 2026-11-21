@@ -222,5 +222,11 @@ test('private uploads and approved illustrations finish with no client connected
   const mixedPath='/api/jobs/'+mixed.id;
   assert.equal((await request(mixedPath+'/upload',mixed.cookie,{pages:[photo,photo]})).status,202);
   await until(async()=> (await (await request(mixedPath,mixed.cookie)).json()).state==='review');
+  assert.equal((await request(mixedPath+'/publish',mixed.cookie,{...visionResult,reviewed:true})).status,202);
+  await until(async()=> (await (await request(mixedPath)).json()).state==='complete');
+  assert.equal(imageRequest.quality,'high');
+  assert.equal(imageRequest.model,'gpt-image-2.6-sunburst');
+  assert.equal(readingRequest.reasoning.effort,'high');
+  assert.equal((await request('/fonts/dm-sans-OFL.txt')).status,200);
   assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);
 });

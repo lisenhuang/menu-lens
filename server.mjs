@@ -618,7 +618,7 @@ const server = createServer(async (req,res)=>{
       }
       return write(res,200,html,mime.html);
     }
-    if (/^\/(?:[a-z][a-z0-9.-]+|(?:images|fonts)\/[a-z0-9.-]+)$/.test(path)) {
+    if (/^\/(?:[a-z][a-z0-9.-]+|(?:images|fonts)\/[A-Za-z0-9.-]+)$/.test(path)) {
       const type = mime[extname(path).slice(1)];
       if (type) {
         try {
