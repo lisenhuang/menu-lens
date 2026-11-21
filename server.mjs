@@ -73,7 +73,10 @@ const history = generationHistory(db);
 function readForRun(id,pages) {
   const model=environment.OPENAI_VISION_MODEL || 'gpt-5-mini';
   const {reasoning}=settings();
-  return history.measure(id,'read','Menu transcription',model,reasoning,received=>readMenu(pages,reasoning,received));
+  return history.measure(id,'read','Menu transcription',model,reasoning,received=>{
+    notifyProgress(id);
+    return readMenu(pages,reasoning,received);
+  });
 }
 const placesPath = environment.NZ_RESTAURANT_INDEX || '';
 const placesData = environment.R2_MAP_KEY ? await getObject(environment.R2_MAP_KEY) : placesPath && existsSync(placesPath) ? readFileSync(placesPath) : null;
@@ -158,7 +161,7 @@ function jobOwner(req) {
   return token ? sha(token) : session(req,false)?.id;
 }
 function privateDraft(id, owner) {
-  const draft = owner && db.prepare(`SELECT drafts.state, sessions.details, drafts.error
+  const draft = owner && db.prepare(`SELECT drafts.state, sessions.details, drafts.error, json_array_length(drafts.pages) AS pageCount
     FROM drafts JOIN sessions ON sessions.id=drafts.owner
     WHERE drafts.id=? AND drafts.owner=? AND sessions.expires>?`).get(id,owner,Date.now());
   if (!draft) throw new RequestError(404,'This submission is unavailable. Open it in the browser you used to upload.');
@@ -167,8 +170,73 @@ function privateDraft(id, owner) {
 function jobStatus(row, owner) {
   const payload = JSON.parse(row.payload);
   const completed = db.prepare('SELECT count(*) AS count FROM dish_objects WHERE menu_id=?').get(row.id).count;
-  return {id:row.id,name:payload.restaurant.name,state:row.state,completed,total:payload.dishes.length,
+  const illustrating=row.state==='running' ? db.prepare("SELECT label FROM generation_calls WHERE run_id=? AND kind='image' AND state='running' ORDER BY seq").all(row.id).map(call=>call.label) : [];
+  return {id:row.id,name:payload.restaurant.name,state:row.state,completed,illustrating,total:payload.dishes.length,
     canRetry:row.state==='error' && row.owner===owner && row.attempts<3};
+}
+
+const activeStates=new Set(['uploading','waiting','reading','queued','running']);
+const watchers=new Map();
+let openStreams=0;
+
+function submissionStatus(id,owner) {
+  const row=db.prepare('SELECT * FROM menus WHERE id=?').get(id);
+  if (row) return jobStatus(row,owner);
+  const draft=privateDraft(id,owner);
+  const {restaurant,date}=JSON.parse(draft.details);
+  const transcribing=draft.state==='reading' && Boolean(db.prepare("SELECT 1 FROM generation_calls WHERE run_id=? AND kind='read' AND state='running'").get(id));
+  return {id,name:restaurant.name,restaurant,date,state:draft.state,error:draft.error,pageCount:draft.pageCount,transcribing};
+}
+function notifyProgress(id) {
+  for (const send of watchers.get(id) || []) send();
+}
+function streamProgress(res,id,owner) {
+  const initial=submissionStatus(id,owner);
+  const group=watchers.get(id) || new Set();
+  if (openStreams>=512 || group.size>=40) throw new RequestError(429,'Live updates are busy. Checking again shortly.');
+  res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'private, no-store, no-transform',
+    'X-Accel-Buffering':'no','Vary':'Cookie'});
+  let last;
+  function send(snapshot) {
+    if (res.destroyed || res.writableEnded) return;
+    try {
+      const status=snapshot || submissionStatus(id,owner);
+      const data=JSON.stringify(status);
+      if (data!==last) {
+        last=data;
+        if (!res.write('data: '+data+'\n\n')) {res.end();return;}
+      }
+      if (!activeStates.has(status.state)) res.end();
+    } catch {res.end();}
+  }
+  // The heartbeat keeps proxies open and rechecks draft expiry during long reads.
+  const heartbeat=setInterval(()=>{
+    if (!res.write(': heartbeat\n\n')) {res.end();return;}
+    send();
+  },15000);
+  watchers.set(id,group);
+  group.add(send);
+  openStreams++;
+  res.once('close',()=>{
+    clearInterval(heartbeat);
+    group.delete(send);
+    if (!group.size) watchers.delete(id);
+    openStreams--;
+  });
+  send(initial);
+}
+
+// The private draft cookie is scoped to its API path. HTML can show approved menu
+// progress directly, while draft details arrive through the authenticated stream.
+function progressDocument(menu) {
+  const status=menu && jobStatus(menu);
+  const title=status ? escape(status.name) : 'Opening your submission';
+  const message=status ? `${status.completed} of ${status.total} dish images ready` : 'Checking your menu’s progress…';
+  const content=`<main id="main" class="shell"><div class="page" id="job-opening">
+    <a class="breadcrumb" href="/submissions">Your submissions</a><div class="page-heading">
+    <p class="eyebrow page-kicker">MENU SUBMISSION</p><h1 class="page-title">${title}</h1>
+    <p class="page-intro">${message}</p></div></div></main>`;
+  return document.replace(/<main id="main"[\s\S]*?<\/main>/,()=>content);
 }
 
 function details(body) {
@@ -229,6 +297,7 @@ async function readDrafts() {
     while ((draft=db.prepare(`SELECT drafts.id, drafts.pages FROM drafts JOIN sessions ON sessions.id=drafts.owner
       WHERE drafts.state='waiting' AND sessions.expires>? ORDER BY drafts.rowid LIMIT 1`).get(Date.now()))) {
       db.prepare("UPDATE drafts SET state='reading' WHERE id=?").run(draft.id);
+      notifyProgress(draft.id);
       try {
         const pages=await Promise.all(JSON.parse(draft.pages).map(async key=>
           'data:image/jpeg;base64,'+(await getObject(key)).toString('base64')));
@@ -239,6 +308,7 @@ async function readDrafts() {
           continue;
         }
         db.prepare("UPDATE drafts SET state='review', result=? WHERE id=?").run(JSON.stringify(output),draft.id);
+        notifyProgress(draft.id);
       } catch (error) {
         const message = error instanceof RequestError ? error.message : 'The menu could not be read. Try again with a clear photo.';
         finishRead(draft,'read_error',message);
@@ -255,6 +325,7 @@ function finishRead(draft,state,message) {
     db.prepare("UPDATE drafts SET state=?,error=?,pages='[]' WHERE id=?").run(state,message,draft.id);
     db.exec('COMMIT');
   } catch(error) {db.exec('ROLLBACK');throw error;}
+  notifyProgress(draft.id);
   void cleanObjects();
 }
 async function cleanObjects() {
@@ -278,6 +349,7 @@ async function runQueue() {
     let row;
     while ((row=db.prepare("SELECT * FROM menus WHERE state='queued' ORDER BY created LIMIT 1").get())) {
       db.prepare("UPDATE menus SET state='running' WHERE id=?").run(row.id);
+      notifyProgress(row.id);
       const {dishes,imageSettings} = JSON.parse(row.payload);
       const imageConfig = imageSettings || {model:environment.OPENAI_IMAGE_MODEL || 'gpt-image-2.6-flare',quality:'medium'};
       const done = new Set(db.prepare('SELECT position FROM dish_objects WHERE menu_id=?').all(row.id).map(item=>item.position));
@@ -287,15 +359,16 @@ async function runQueue() {
           const results = await Promise.allSettled(remaining.slice(i,i+2).map(async item=>{
             const key=dishKey(row.id,item.i);
             // A restart can land between a successful R2 write and its SQLite checkpoint.
-            if (await objectExists(key)) {
-              db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
-              return;
+            if (!await objectExists(key)) {
+              if (!rate('images:daily',dayLimit,86_400_000)) throw new RequestError(429,'Daily image capacity reached.');
+              const bytes=await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,received=>{
+                notifyProgress(row.id);
+                return generateDish(item.dish,imageConfig,received);
+              });
+              await putObject(key,bytes,'image/webp');
             }
-            if (!rate('images:daily',dayLimit,86_400_000)) throw new RequestError(429,'Daily image capacity reached.');
-            const bytes = await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,
-              received=>generateDish(item.dish,imageConfig,received));
-            await putObject(key,bytes,'image/webp');
             db.prepare('INSERT INTO dish_objects VALUES (?,?,?)').run(row.id,item.i,key);
+            notifyProgress(row.id);
           }));
           if (results.some(result=>result.status==='rejected')) throw new Error('Image batch unfinished');
         }
@@ -303,6 +376,7 @@ async function runQueue() {
       } catch {
         db.prepare("UPDATE menus SET state='error' WHERE id=?").run(row.id);
       }
+      notifyProgress(row.id);
     }
   } finally {
     working = false;
@@ -368,6 +442,7 @@ async function publish(req,res,id,owner) {
     db.exec('ROLLBACK');
     throw error;
   }
+  notifyProgress(id);
   queue();
   return write(res,202,{id});
 }
@@ -377,6 +452,7 @@ function retryImages(req,res,id,owner) {
   const retried = db.prepare("UPDATE menus SET state='queued', attempts=attempts+1 WHERE id=? AND owner=? AND state='error' AND attempts<3").run(id,owner);
   if (!retried.changes) throw new RequestError(409,'This menu cannot be retried right now.');
   history.imageRequester(id,clientIp(req));
+  notifyProgress(id);
   queue();
   return write(res,202,{ok:true});
 }
@@ -399,6 +475,7 @@ async function submitPages(req,id,owner,body) {
     }
     history.register(id,JSON.parse(owner.details).restaurant.name,clientIp(req));
     db.prepare("UPDATE drafts SET state='waiting' WHERE id=?").run(id);
+    notifyProgress(id);
   } catch(error) {
     db.prepare('DELETE FROM drafts WHERE id=?').run(id);
     void cleanObjects();
@@ -409,14 +486,10 @@ async function submitPages(req,id,owner,body) {
 
 async function jobApi(req,res,id,action) {
   const owner = jobOwner(req);
-  const row = db.prepare('SELECT * FROM menus WHERE id=?').get(id);
   if (req.method==='GET') {
-    if (!action && row) return write(res,200,jobStatus(row,owner));
-    const draft = privateDraft(id,owner);
-    if (!action) {
-      const {restaurant,date} = JSON.parse(draft.details);
-      return write(res,200,{id,name:restaurant.name,restaurant,date,state:draft.state,error:draft.error});
-    }
+    if (action==='events') return streamProgress(res,id,owner);
+    if (!action) return write(res,200,submissionStatus(id,owner));
+    const draft=privateDraft(id,owner);
     if (action==='review' && draft.state==='review') {
       const result = db.prepare('SELECT result,json_array_length(pages) AS photoCount FROM drafts WHERE id=?').get(id);
       return write(res,200,{...JSON.parse(result.result),photoCount:result.photoCount});
@@ -426,6 +499,7 @@ async function jobApi(req,res,id,action) {
       if (photo) return write(res,200,await getObject(photo),'image/jpeg');
     }
   } else if (req.method==='POST') {
+    const row=db.prepare('SELECT * FROM menus WHERE id=?').get(id);
     if (!ready) throw new RequestError(503,statusText);
     if (!owner || (row ? row.owner!==owner : submissionId(owner)!==id)) throw new RequestError(403,'Open this submission in the browser you used to upload.');
     if (row && action==='retry') return retryImages(req,res,id,owner);
@@ -502,7 +576,7 @@ async function api(req,res,path) {
     if (!row) throw new RequestError(404,'This menu could not be found.');
     return write(res,200,publicMenu(row));
   }
-  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(review|upload|publish|retry|photos\/[0-5]))?$/);
+  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|retry|photos\/[0-5]))?$/);
   if (job) return jobApi(req,res,job[1],job[2]);
   if (path === '/api/job' && get) {
     const owner = session(req,false);
@@ -607,10 +681,10 @@ const server = createServer(async (req,res)=>{
     if (['/','/create','/explore','/privacy','/submissions'].includes(path) || publicId.test(id)) {
       let html = document;
       if (id) {
-        const row = db.prepare("SELECT * FROM menus WHERE id=? AND state='complete'").get(id);
-        if (!row) {
-          const pending = db.prepare('SELECT id FROM menus WHERE id=? UNION ALL SELECT id FROM drafts WHERE id=?').get(id,id);
-          return write(res,pending ? 200 : 404,document,mime.html,{'X-Robots-Tag':'noindex'});
+        const row=db.prepare('SELECT * FROM menus WHERE id=?').get(id);
+        if (row?.state!=='complete') {
+          const pending=row || db.prepare('SELECT id FROM drafts WHERE id=?').get(id);
+          return write(res,pending ? 200 : 404,progressDocument(row),mime.html,{'X-Robots-Tag':'noindex'});
         }
         const summary = card(row);
         html = document.replace('<meta property="og:title" content="Menu Lens">', () => `<meta property="og:title" content="${escape(summary.restaurant.name)} · Menu Lens">`)

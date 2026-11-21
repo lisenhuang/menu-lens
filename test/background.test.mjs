@@ -4,6 +4,8 @@ import {randomBytes,randomInt,scryptSync} from 'node:crypto';
 import {fork} from 'node:child_process';
 import {once} from 'node:events';
 import {createServer} from 'node:http';
+import {Readable} from 'node:stream';
+import {createInterface} from 'node:readline';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -26,6 +28,7 @@ test('private uploads and approved illustrations finish with no client connected
   let readingRequest,imageRequest;
   let imageFails=true;
   let holdImages=true;
+  let holdBread=false;
   let holdRead=true;
   let imageCalls=0;
   let readCalls=0;
@@ -55,7 +58,8 @@ test('private uploads and approved illustrations finish with no client connected
     } else if (req.url==='/v1/images/generations') {
       imageRequest=JSON.parse(body);
       imageCalls++;
-      while (holdImages && !res.destroyed) await delay(10);
+      const bread=imageRequest.prompt.includes('"name":"Bread"');
+      while ((holdImages || (holdBread && bread)) && !res.destroyed) await delay(10);
       if (imageFails) res.statusCode=503;
       response=imageFails ? {error:{}} : {data:[{b64_json:webpFixture}],usage:{input_tokens:200,output_tokens:1200}};
     } else throw new Error('Unhandled test provider path');
@@ -77,7 +81,7 @@ test('private uploads and approved illustrations finish with no client connected
     await stopped;
   }
   t.after(async()=>{
-    holdRead=false;holdImages=false;
+    holdRead=false;holdImages=false;holdBread=false;
     await stop();
     provider.closeAllConnections();
     await new Promise(resolve=>provider.close(resolve));
@@ -105,6 +109,28 @@ test('private uploads and approved illustrations finish with no client connected
   function request(path,cookie='',body,ip='192.0.2.45') {
     const headers={cookie,origin,'cf-connecting-ip':ip,'content-type':'application/json'};
     return fetch(origin+path,{headers,method:body?'POST':'GET',body:body&&JSON.stringify(body)});
+  }
+  async function events(path,cookie='') {
+    const abort=new AbortController();
+    const response=await fetch(origin+path+'/events',{headers:{cookie},signal:AbortSignal.any([abort.signal,AbortSignal.timeout(8000)])});
+    assert.equal(response.status,200);
+    assert.match(response.headers.get('content-type'),/text\/event-stream/);
+    assert.match(response.headers.get('cache-control'),/no-store/);
+    const lines=createInterface({input:Readable.fromWeb(response.body),crlfDelay:Infinity});
+    const iterator=lines[Symbol.asyncIterator]();
+    return {
+      close(){abort.abort();},
+      async next(when) {
+        for (;;) {
+          const {value,done}=await iterator.next();
+          assert.ok(!done,'Stream ended before expected update');
+          if (value.startsWith('data: ')) {
+            const job=JSON.parse(value.slice(6));
+            if (when(job)) return job;
+          }
+        }
+      },
+    };
   }
   async function verify(name) {
     const r=await request('/api/verify','',{name,address:'Example Street',date:'2025-01-01',
@@ -142,6 +168,8 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal((await request(api+'/upload',first.cookie,{pages:[photo]})).status,202);
   await until(()=>readCalls===1);
   assert.equal((await request(api)).status,404);
+  assert.equal((await request(api+'/events')).status,404);
+  assert.doesNotMatch(await (await request('/menu/'+first.id)).text(),/Test kitchen/);
   assert.equal((await request('/menu/'+first.id)).headers.get('x-robots-tag'),'noindex');
   await stop();
   holdRead=false;
@@ -218,12 +246,30 @@ test('private uploads and approved illustrations finish with no client connected
   await until(()=>objects.size===maxObjects);
   assert.equal(imageCalls,imagesBefore);
   visionResult={...menu,dishes:[...visionResult.dishes,{...menu.dishes[0],name:'Bread',hasDishPhoto:false}]};
+  holdRead=true;
   const mixed=await verify('Mixed photos');
   const mixedPath='/api/jobs/'+mixed.id;
   assert.equal((await request(mixedPath+'/upload',mixed.cookie,{pages:[photo,photo]})).status,202);
-  await until(async()=> (await (await request(mixedPath,mixed.cookie)).json()).state==='review');
+  const reading=await events(mixedPath,mixed.cookie);
+  const readStatus=await reading.next(job=>job.state==='reading' && job.transcribing);
+  assert.equal(readStatus.pageCount,2);
+  holdRead=false;
+  await reading.next(job=>job.state==='review');
+  holdImages=true;
+  holdBread=true;
   assert.equal((await request(mixedPath+'/publish',mixed.cookie,{...visionResult,reviewed:true})).status,202);
-  await until(async()=> (await (await request(mixedPath)).json()).state==='complete');
+  const images=await events(mixedPath,mixed.cookie);
+  await images.next(job=>job.illustrating?.includes('Soup') && job.illustrating.includes('Bread'));
+  holdImages=false;
+  const partial=await images.next(job=>job.completed===1);
+  assert.equal(partial.total,2);
+  assert.deepEqual(partial.illustrating,['Bread']);
+  assert.match(await (await request('/menu/'+mixed.id)).text(),/1 of 2 dish images ready/);
+  images.close();
+  const resumed=await events(mixedPath,mixed.cookie);
+  await resumed.next(job=>job.state==='running' && job.completed===1);
+  holdBread=false;
+  assert.equal((await resumed.next(job=>job.state==='complete')).completed,2);
   assert.equal(imageRequest.quality,'high');
   assert.equal(imageRequest.model,'gpt-image-2.6-sunburst');
   assert.equal(readingRequest.reasoning.effort,'high');

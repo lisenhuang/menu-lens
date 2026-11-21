@@ -592,7 +592,7 @@ function consentModal() {
         return dataUrl(blob);
       }));
       const {id}=await api('/jobs/'+verified.id+'/upload',{pages});
-      remember(id,state.name);
+      remember(id,state.name,true);
       location.assign('/menu/'+id);
     } catch(err) {
       errorAt(error,err.message);
@@ -684,7 +684,7 @@ function reviewStep() {
     try {
       const result=await api('/jobs/'+state.submissionId+'/publish',{reviewed:reviewed.checked,
         dishes:state.dishes,notes:state.notes,transcript:state.transcript});
-      remember(result.id,state.name);
+      remember(result.id,state.name,true);
       location.replace('/menu/'+result.id);
     } catch(error) {
       if (error.status===403) {
@@ -713,10 +713,10 @@ function savedSubmissions() {
     }).sort((a,b)=>b.saved-a.saved);
   } catch {return [];}
 }
-function remember(id,name) {
+function remember(id,name,updated=false) {
   try {
     const key=savedPrefix+id;
-    if (!localStorage.getItem(key)) localStorage.setItem(key,JSON.stringify({id,name,saved:Date.now()}));
+    if (updated || !localStorage.getItem(key)) localStorage.setItem(key,JSON.stringify({id,name,saved:Date.now()}));
     for (const item of savedSubmissions().slice(20)) localStorage.removeItem(savedPrefix+item.id);
   } catch {}
 }
@@ -733,8 +733,82 @@ async function recoverSubmissions() {
   revealReturnLink();
 }
 const labels={waiting:'Waiting to read',reading:'Reading the menu',review:'Ready to review',
-  uploading:'Uploading photos',already_illustrated:'Every dish already has a photo',read_error:'Photos need attention',queued:'Waiting for illustrations',running:'Illustrating dishes',
+  uploading:'Uploading photos',already_illustrated:'Every dish already has a photo',read_error:'Menu reading stopped',queued:'Waiting for illustrations',running:'Illustrating dishes',
   error:'Images need attention',complete:'Published'};
+const imageCount=job=>`${job.completed} of ${job.total} dish images ready`;
+const liveStates=new Set(['uploading','waiting','reading','queued','running']);
+function statusLabel(job) {
+  if (job.state==='running') return job.completed===job.total?'Publishing menu':imageCount(job);
+  if (job.state==='reading') {
+    const count=job.pageCount;
+    if (!job.transcribing) return 'Opening menu photos';
+    return count ? `Reading ${count} menu ${count===1?'photo':'photos'}` : 'Reading menu photos';
+  }
+  return labels[job.state] || 'Checking progress';
+}
+
+// Reconnect from a full snapshot so missed events and server restarts need no replay.
+function watchJob(id,onStatus,onError) {
+  const path='/jobs/'+id;
+  let source,timer,last,revision=0,finished=false;
+  function disconnect() {
+    revision++;
+    clearTimeout(timer);
+    source?.close();
+    source=null;
+  }
+  function stop() {
+    finished=true;
+    disconnect();
+    document.removeEventListener('visibilitychange',resume);
+    window.removeEventListener('pagehide',disconnect);
+    window.removeEventListener('pageshow',resume);
+    window.removeEventListener('online',resume);
+  }
+  function failure(error,rev) {
+    if (rev!==revision || finished) return;
+    last=undefined;
+    disconnect();
+    onError(error);
+    if (error.status===404 || error.status===403) return stop();
+    if (!document.hidden) timer=setTimeout(refresh,4000);
+  }
+  async function accept(job,rev) {
+    if (rev!==revision || finished) return;
+    const active=liveStates.has(job.state);
+    if (!active) {source?.close();source=null;}
+    const signature=JSON.stringify(job);
+    if (last!==signature) {
+      await onStatus(job);
+      if (rev!==revision) return;
+      last=signature;
+    }
+    if (!active) return stop();
+    if (source) return;
+    if (!window.EventSource) {timer=setTimeout(refresh,3500);return;}
+    source=new EventSource('/api'+path+'/events');
+    source.onmessage=event=>{
+      if (rev!==revision) return;
+      try {void accept(JSON.parse(event.data),rev).catch(error=>failure(error,rev));}
+      catch(error) {failure(error,rev);}
+    };
+    source.onerror=()=>failure(new Error('Live connection interrupted.'),rev);
+  }
+  async function refresh() {
+    disconnect();
+    const rev=revision;
+    if (finished || document.hidden) return;
+    try {await accept(await api(path),rev);}
+    catch(error) {failure(error,rev);}
+  }
+  function resume() {if (!finished) void refresh();}
+  document.addEventListener('visibilitychange',resume);
+  window.addEventListener('pagehide',disconnect);
+  window.addEventListener('pageshow',resume);
+  window.addEventListener('online',resume);
+  void refresh();
+  return stop;
+}
 async function submissions() {
   document.title='Your submissions · Menu Lens';
   page('Your submissions','MENU LENS','Reopen a menu you started in this browser.',
@@ -748,103 +822,95 @@ async function submissions() {
   }
   list.innerHTML=items.map(item=>`<a class="panel saved-menu" href="/menu/${item.id}">
     <span><strong>${escape(item.name)}</strong><small data-status="${item.id}">Check progress</small></span>${icon('book')}</a>`).join('');
-  await Promise.all(items.map(async item=>{
+  for (const item of items) {
     const status=$(`[data-status="${item.id}"]`,list);
-    try {
-      const job=await api('/jobs/'+item.id);
-      status.textContent=labels[job.state];
-    } catch(error) {
-      if (error.status===404) status.textContent='Submission unavailable';
-    }
-  }));
+    watchJob(item.id,job=>{status.textContent=statusLabel(job);},error=>{
+      status.textContent=error.status===404?'Submission unavailable':'Reconnecting…';
+    });
+  }
 }
 async function openSubmission(id) {
   const path='/jobs/'+id;
-  let previous='';
-  let timer;
-  let checking=false;
-  let done=false;
   const back=pagesBack('/submissions','Your submissions');
   document.title='Menu progress · Menu Lens';
-  async function refresh() {
-    if (done || checking) return;
-    checking=true;
-    clearTimeout(timer);
-    try {
-      const job=await api(path);
-      if (job.state==='complete') {
-        done=true;
-        return await showMenu(id);
-      }
-      if (job.state==='review') {
-        const output=await api(path+'/review');
-        const {restaurant,date}=job;
-        Object.assign(state,{step:3,submissionId:id,name:restaurant.name,address:restaurant.address,date,
-          place:restaurant.placeId ? {id:restaurant.placeId,name:restaurant.name,address:restaurant.address} : null,
-          confirmed:true,read:true,verified:true,dishes:output.dishes,transcript:output.transcript,
-          notes:output.notes,warnings:output.warnings,files:Array.from({length:output.photoCount},(_,i)=>({
-            name:'Menu page '+(i+1),url:'/api'+path+'/photos/'+i,
-          }))});
-        remember(id,job.name);
-        page(escape(job.name),'MENU REVIEW','Your menu is ready to check. Review it within 24 hours of uploading.',
-          '<section class="panel review-panel" id="flow"></section>',back);
-        document.title='Review '+job.name+' · Menu Lens';
-        flow=$('#flow');
-        renderStep();
-        api('/config').then(config=>{state.config=config;if(state.step===2) updateLocation();}).catch(()=>{});
-        done=true;
-        return;
-      }
-      const signature=JSON.stringify(job);
-      if (signature!==previous) {
-        const reading=['uploading','waiting','reading'].includes(job.state);
-        const active=reading || ['queued','running'].includes(job.state);
-        const title=reading ? 'Reading your menu' : labels[job.state];
-        const message=reading ? 'You can close this page. Come back in this browser to review the dishes and prices before publishing.' :
-          active ? 'You can close this page. Your menu will publish at this link as soon as every dish has an illustration.' :
-          ['already_illustrated','read_error'].includes(job.state) ? job.error : 'Generation stopped before all the images were ready. Completed illustrations have been saved.';
-        const progress=Number.isInteger(job.total) ? `<progress class="progress" aria-label="Dish images generated" value="${job.completed}" max="${job.total}"></progress>
-          <p class="field-hint">${job.completed} of ${job.total} dish images ready</p>` : '';
-        page(escape(job.name),'MENU SUBMISSION','',`<section class="panel progress-panel">
-          <div class="modal-icon">${icon(reading?'book':'sparkles')}</div><h2>${title}</h2><p class="muted">${escape(message)}</p>
-          ${progress}<p class="error" id="job-error" role="status" hidden></p>
-          <div class="inline-actions"><button class="btn quiet" id="save-link">${icon('link')} Copy return link</button>
-          ${job.canRetry ? primary('Retry remaining images','sparkles','id="retry"') : ''}
-          ${['already_illustrated','read_error'].includes(job.state) ? '<a class="btn primary" href="/create">Upload another menu</a>' : ''}</div></section>`,back);
-        document.title=title+' · '+job.name+' · Menu Lens';
-        $('#save-link').onclick=()=>share('Return link');
-        if (job.canRetry) $('#retry').onclick=async event=>{
-          const button=event.currentTarget;
-          button.disabled=true;
-          try {await api(path+'/retry',{});done=false;previous='';void refresh();}
-          catch(error) {errorAt($('#job-error'),error.message);button.disabled=false;}
-        };
-        previous=signature;
-        done=!active;
-      }
-      errorAt($('#job-error'),'');
-    } catch(error) {
-      if (error.status===404) {
-        done=true;
-        page('Menu unavailable','MENU LENS','Open private drafts in the browser you used to upload. Drafts expire after 24 hours.',
-          '<a href="/explore" class="btn quiet">Explore published menus</a>',back);
-      } else if ($('#job-error')) {
-        errorAt($('#job-error'),'Connection interrupted. Checking again shortly…');
-      } else {
-        page('Checking your menu','MENU LENS','Reconnecting to your submission…','',back);
-      }
-    } finally {
-      checking=false;
-      if (!done && !document.hidden) timer=setTimeout(refresh,3500);
+  if (!$('#job-opening')) page('Opening your menu','MENU LENS','','',back);
+  watchJob(id,async job=>{
+    if (job.state==='complete') return showMenu(id);
+    if (job.state==='review') {
+      const output=await api(path+'/review');
+      const {restaurant,date}=job;
+      Object.assign(state,{step:3,submissionId:id,name:restaurant.name,address:restaurant.address,date,
+        place:restaurant.placeId ? {id:restaurant.placeId,name:restaurant.name,address:restaurant.address} : null,
+        confirmed:true,read:true,verified:true,dishes:output.dishes,transcript:output.transcript,
+        notes:output.notes,warnings:output.warnings,files:Array.from({length:output.photoCount},(_,i)=>({
+          name:'Menu page '+(i+1),url:'/api'+path+'/photos/'+i,
+        }))});
+      remember(id,job.name);
+      page(escape(job.name),'MENU REVIEW','Your menu is ready to check. Review it within 24 hours of uploading.',
+        '<section class="panel review-panel" id="flow"></section>',back);
+      document.title='Review '+job.name+' · Menu Lens';
+      flow=$('#flow');
+      renderStep();
+      api('/config').then(config=>{state.config=config;if(state.step===2) updateLocation();}).catch(()=>{});
+      return;
     }
-  }
-  document.addEventListener('visibilitychange',()=>{
-    clearTimeout(timer);
-    if (!document.hidden) void refresh();
+    const images=Number.isInteger(job.total);
+    const active=liveStates.has(job.state);
+    const publishing=job.state==='running' && job.completed===job.total;
+    const title=publishing?'Publishing menu':job.state==='running'?'Illustrating dishes':statusLabel(job);
+    const messages={
+      uploading:'Keep the upload page open until your photos have been received.',
+      waiting:'Your photos are saved. Reading will start when the previous menu finishes.',
+      reading:job.transcribing?'Checking dish names, prices and which dishes already have photos.':'Retrieving your photos for menu reading.',
+      queued:'Your reviewed menu is in the illustration queue.',
+      running:job.illustrating?.length ? 'Working on '+job.illustrating.join(' and ')+'.' : 'Preparing the next illustrations for your menu.',
+      error:'Generation stopped before all the images were ready. Completed illustrations have been saved.',
+    };
+    const message=publishing?'All dish images are ready.':job.error || messages[job.state] || '';
+    if (!$('#job-panel')) {
+      page(escape(job.name),'MENU SUBMISSION','',`<section class="panel progress-panel" id="job-panel">
+        <ol class="job-stages" aria-label="Menu progress">${['Read menu','Review','Illustrate','Publish'].map(label=>`<li><span></span>${label}</li>`).join('')}</ol>
+        <div aria-live="polite" aria-atomic="true"><h2 id="job-title"></h2><p id="job-message" class="muted"></p><strong id="image-count"></strong></div>
+        <progress id="job-meter" class="progress" aria-label="Menu progress"></progress>
+        <p class="field-hint" id="job-return"></p><p class="error" id="job-error" role="status" hidden></p>
+        <div class="inline-actions"><button class="btn quiet" id="save-link">${icon('link')} Copy return link</button>
+        ${primary('Retry remaining images','sparkles','id="retry" hidden')}<a class="btn primary" href="/create" id="new-upload" hidden>Upload another menu</a></div></section>`,back);
+      $('#save-link').onclick=()=>share('Return link');
+      $('#retry').onclick=async event=>{
+        const button=event.currentTarget;
+        button.disabled=true;
+        try {await api(path+'/retry',{});remember(id,job.name,true);void openSubmission(id);}
+        catch(error) {errorAt($('#job-error'),error.message);button.disabled=false;}
+      };
+    }
+    const step=publishing?3:images?2:0;
+    document.querySelectorAll('.job-stages li').forEach((el,i)=>{
+      el.classList.toggle('past',i<step);
+      el.classList.toggle('stopped',i===step && !active);
+      if (i===step) el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');
+    });
+    $('#job-title').textContent=title;
+    $('#job-message').textContent=message;
+    $('#image-count').textContent=images?imageCount(job):'';
+    const meter=$('#job-meter');
+    meter.hidden=!active && !images;
+    if (images) {meter.max=job.total;meter.value=job.completed;} else meter.removeAttribute('value');
+    $('#job-return').textContent=active && job.state!=='uploading' ? (images?'You can close this page. Your finished menu will appear at this link.':'You can close this page. Return here in this browser to review your menu.') : '';
+    $('#retry').hidden=!job.canRetry;
+    $('#new-upload').textContent=job.state==='read_error'?'Upload photos again':'Upload another menu';
+    $('#new-upload').hidden=!['already_illustrated','read_error'].includes(job.state);
+    errorAt($('#job-error'),'');
+    document.title=title+' · '+job.name+' · Menu Lens';
+  },error=>{
+    if (error.status===404 || error.status===403) {
+      page('Menu unavailable','MENU LENS','Open private drafts in the browser you used to upload. Drafts expire after 24 hours.',
+        '<a href="/explore" class="btn quiet">Explore published menus</a>',back);
+    } else if ($('#job-error')) {
+      errorAt($('#job-error'),'Connection interrupted. Reconnecting…');
+    } else {
+      page('Checking your menu','MENU LENS','Reconnecting to your submission…','',back);
+    }
   });
-  window.addEventListener('pageshow',event=>{if (event.persisted) location.reload();});
-  page('Opening your menu','MENU LENS','','',back);
-  await refresh();
 }
 
 const route = location.pathname.replace(/\/$/,'') || '/';
@@ -854,8 +920,29 @@ else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();
 else if (route==='/submissions') void submissions();
-else if (route.startsWith('/menu/')) void openSubmission(route.split('/')[2]);
+else if (route.startsWith('/menu/')) {
+  void openSubmission(route.split('/')[2]);
+  window.addEventListener('pageshow',event=>{if (event.persisted) location.reload();});
+}
 if (['/','/create','/explore'].includes(route)) {
   revealReturnLink();
-  void recoverSubmissions();
+  let stopLatest;
+  function followLatest() {
+    stopLatest?.();
+    const latest=savedSubmissions()[0];
+    const link=$('#latest-progress');
+    link.hidden=true;
+    if (!latest) return;
+    revealReturnLink();
+    stopLatest=watchJob(latest.id,job=>{
+      link.hidden=job.state==='complete';
+      link.href='/menu/'+latest.id;
+      link.textContent=job.name+' · '+statusLabel(job);
+    },()=>{link.hidden=true;});
+  }
+  void recoverSubmissions().then(followLatest);
+  window.addEventListener('storage',event=>{if (event.key?.startsWith(savedPrefix)) followLatest();});
+}
+if (route==='/submissions') {
+  window.addEventListener('storage',event=>{if (event.key?.startsWith(savedPrefix)) location.reload();});
 }
