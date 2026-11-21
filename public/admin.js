@@ -129,14 +129,13 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
       return `<details class="history-run" data-run="${escape(run.id)}"><summary>
         <span><strong>${escape(run.restaurant)}</strong><small>${escape(when(run.recorded))} · ${escape(run.state)}</small></span>
         <span class="history-price"><strong>${amount}</strong><small>${basis}</small></span></summary>
-        <div class="history-details"><p><strong>Upload IP</strong> ${escape(run.uploadIp || 'Not recorded')}</p>
-        ${run.imageIp && run.imageIp!==run.uploadIp ? `<p><strong>Image request IP</strong> ${escape(run.imageIp)}</p>` : ''}
+        <div class="history-details"><p><strong>IP address</strong> ${escape(run.uploadIp || run.imageIp || 'Not recorded')}</p>
         ${reference}<div class="history-calls"></div></div></details>`;
     }
     function callRow(call) {
       const amount=call.usd===null ? 'Cost unknown' : currency(call.usd);
       return `<li><div><strong>${escape(call.label)}</strong><small>${escape(when(call.started))} · ${escape(call.state)}</small>
-        <small>${escape(call.model)} · ${escape(call.level)} · IP ${escape(call.ip || 'not recorded')}</small></div>
+        <small>${escape(call.model)} · ${escape(call.level)}</small></div>
         <span class="history-price"><strong>${amount}</strong><small>${escape(call.basis)}</small></span></li>`;
     }
     async function load(older) {
