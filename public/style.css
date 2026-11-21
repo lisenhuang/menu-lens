@@ -77,10 +77,10 @@ svg{display:block;width:1.125rem;height:1.125rem;flex:none}
 .section-top .eyebrow,.page-kicker{margin-bottom:.35rem}
 .dish-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.05rem}
 .dish-card{min-width:0;border:1px solid var(--line);border-radius:17px;overflow:hidden;background:var(--panel);display:block;transition:border-color .18s,box-shadow .18s}
-.menu-card:has(a:hover){border-color:var(--green);box-shadow:var(--shadow)}
+.menu-card:has(.menu-card-link:is(:hover,:focus-visible)){border-color:var(--green);box-shadow:var(--shadow)}
 .dish-image{display:block;width:100%;aspect-ratio:1.76;position:relative;overflow:hidden;background:var(--soft)}
 .dish-image img{display:block;width:100%;height:100%;object-fit:cover;transition:transform .28s}
-.menu-card .dish-image:hover img{transform:scale(1.045)}
+.menu-card-link:is(:hover,:focus-visible) .dish-image img{transform:scale(1.045)}
 .dish-body{padding:.95rem 1rem 1.05rem;display:grid;grid-template-columns:1fr auto;gap:.28rem .6rem;align-items:baseline}
 .dish-body .eyebrow{grid-column:1/-1;font-size:.69rem}
 .dish-body h3{font-size:1.28rem;line-height:1.18}
@@ -175,7 +175,8 @@ dialog .btn{max-width:100%;white-space:normal}
 .progress{width:100%;accent-color:var(--green);height:1rem;margin:.6rem 0}
 .toast{z-index:8;position:fixed;right:1rem;bottom:1rem;padding:.75rem 1rem;background:var(--button);color:var(--on-button);border-radius:12px;box-shadow:var(--shadow)}
 .explore-search{max-width:480px;margin-bottom:1.4rem}
-.menu-card{display:block}
+.menu-card-link{display:block;height:100%;border-radius:inherit}
+.menu-card-link:focus-visible{outline-offset:-3px}
 .menu-card p{padding:.15rem 0;color:var(--muted);font-size:.87rem}
 .menu-cover{display:grid;grid-template-columns:1.15fr .85fr;align-items:center;gap:1.25rem;margin-bottom:1.35rem;background:var(--wash);border:1px solid var(--line);border-radius:22px;overflow:hidden}
 .menu-cover-copy{padding:clamp(1rem,4vw,2.25rem)}

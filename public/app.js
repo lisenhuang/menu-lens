@@ -168,9 +168,10 @@ viewer.addEventListener('close',()=>{
 });
 
 function listing(menu) {
-  return `<article class="dish-card menu-card"><a class="dish-image" href="${escape(menu.cover)}" data-view-image aria-haspopup="dialog"><img src="${escape(menu.cover)}" alt="Cover photo for ${escape(menu.restaurant.name)}" width="780" height="500" loading="lazy"></a>
-  <a class="dish-body" href="/menu/${escape(menu.id)}"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
-    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p></div></a></article>`;
+  return `<article class="dish-card menu-card"><a class="menu-card-link" href="/menu/${escape(menu.id)}" aria-label="View ${escape(menu.restaurant.name)} menu">
+    <div class="dish-image"><img src="${escape(menu.cover)}" alt="" width="780" height="500" loading="lazy"></div>
+    <div class="dish-body"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
+    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p></div></div></a></article>`;
 }
 async function home() {
   try {
@@ -366,7 +367,7 @@ function uploadStep() {
 function updateUpload() {
   const list=$('#selected-files');
   if (!list) return;
-  list.innerHTML=state.files.map((file,i)=>`<div class="file-row"><a href="${file.url}" data-view-image aria-haspopup="dialog"><img src="${file.url}" alt="Preview ${escape(file.name)}"></a><span class="truncate">${escape(file.name)}</span>
+  list.innerHTML=state.files.map((file,i)=>`<div class="file-row"><img src="${file.url}" alt="Preview ${escape(file.name)}"><span class="truncate">${escape(file.name)}</span>
     <button type="button" class="icon-button" data-remove="${i}" aria-label="Remove ${escape(file.name)}">${icon('close')}</button></div>`).join('');
   const batch=state.preparing;
   if (batch) {
