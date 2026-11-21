@@ -4,7 +4,7 @@ import {imageModels,outputUsdPerMillion,readingModels} from './admin.mjs';
 const tokenCount=n=>Number.isSafeInteger(n) && n>=0;
 const dollars=value=>value/1_000_000;
 function price(kind,model,level,usage,receivedOutput) {
-  if (kind==='read') {
+  if (kind==='read' || kind==='address') {
     const rates=readingModels[model.replace(/-\d{4}-\d{2}-\d{2}$/,'')];
     const details=usage?.input_tokens_details;
     const cached=details?.cached_tokens ?? 0;
@@ -16,7 +16,11 @@ function price(kind,model,level,usage,receivedOutput) {
       const input=(ordinary+(writes-extended)*1.25+extended*2.5)*rates.input+cached*rates.cached;
       const output=usage.output_tokens*rates.output;
       const long=rates.longContext && usage.input_tokens>272000;
-      return {usd:dollars(long ? input*2+output*1.5 : input+output),basis:'usage'};
+      const tokens=dollars(long ? input*2+output*1.5 : input+output);
+      // OpenAI web search bills search actions at $10 per 1,000 calls.
+      if (kind==='address') return tokenCount(usage.search_calls)
+        ? {usd:tokens+usage.search_calls*0.01,basis:'usage'} : {usd:null,basis:'unknown'};
+      return {usd:tokens,basis:'usage'};
     }
   } else if (Object.hasOwn(imageModels,model)) {
     // The Images API receives a text-only prompt for each dish.
@@ -60,7 +64,7 @@ export function generationHistory(db) {
     if (city && validIp(ip)) saveCity.run(id,ip,city);
   }
   const startCall=db.prepare(`INSERT INTO generation_calls
-    (run_id,started,kind,label,model,level,ip,state) SELECT id,?,?,?,?,?,CASE WHEN ?='read' THEN COALESCE(?,upload_ip) ELSE image_ip END,'running'
+    (run_id,started,kind,label,model,level,ip,state) SELECT id,?,?,?,?,?,CASE WHEN ? IN ('read','address') THEN COALESCE(?,upload_ip) ELSE image_ip END,'running'
     FROM generation_runs WHERE id=? RETURNING seq`);
   const setPrice=db.prepare('UPDATE generation_calls SET usd=?,basis=?,usage=? WHERE seq=?');
   function register(id,name,ip) {

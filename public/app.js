@@ -1,5 +1,5 @@
 import {icons} from './icons.js?v=3';
-import {dishMedia, escape, icon, listing, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=3';
+import {dishMedia, escape, icon, listing, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=4';
 
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#modal');
@@ -169,30 +169,40 @@ viewer.addEventListener('close',()=>{
 
 async function explore() {
   document.title = 'Explore menus · Menu Lens';
-  page('Explore menus','THE PUBLIC COLLECTION','Browse visual menus shared by diners. Look for the date each menu was photographed.',
-    `<label class="field explore-search" id="explore-field" hidden>Restaurant or area<input id="explore-search" type="search" class="control" placeholder="Search menus"></label>
+  page('Explore menus','THE PUBLIC COLLECTION','Find what you feel like eating in menus shared by diners.',
+    `<label class="field explore-search">Restaurant, area or dish<input id="explore-search" type="search" class="control" maxlength="180" placeholder="Try sushi, rice or a suburb"></label>
       <div id="menu-grid" class="dish-grid" aria-live="polite"><p class="muted">Loading menus…</p></div>`);
-  const grid = $('#menu-grid');
-  try {
-    const items = await api('/menus');
-    if (!items.length) {
-      grid.innerHTML = `<div class="panel collection-empty"><h2>No menus published yet</h2>
+  const grid=$('#menu-grid');
+  const search=$('#explore-search');
+  const url=new URL(location.href);
+  search.value=(url.searchParams.get('q') || '').slice(0,180);
+  let version=0,timer;
+  async function render(revision) {
+    const q=search.value.trim();
+    try {
+      const items=await api(q ? '/menus?q='+encodeURIComponent(q) : '/menus');
+      if (revision!==version) return;
+      if (items.length) grid.innerHTML=items.map(listing).join('');
+      else if (q) grid.innerHTML='<p class="muted">No menus match that search. Try another dish, restaurant or area.</p>';
+      else grid.innerHTML=`<div class="panel collection-empty"><h2>No menus published yet</h2>
         <p class="muted">Add a menu from a restaurant you’ve visited.</p>
         <a class="btn primary" href="/create">${icon('camera')} Upload a menu</a></div>`;
-      return;
+    } catch {
+      if (revision===version) grid.innerHTML=notice('The public collection could not be loaded. Try again in a moment.');
+    } finally {
+      if (revision===version) grid.removeAttribute('aria-busy');
     }
-    const search = $('#explore-search');
-    $('#explore-field').hidden = false;
-    const render = ()=>{
-      const q = search.value.toLocaleLowerCase().trim();
-      const result = items.filter(menu=>[menu.restaurant.name,menu.restaurant.address].join(' ').toLocaleLowerCase().includes(q));
-      grid.innerHTML = result.length ? result.map(listing).join('') : '<p class="muted">No menus match that search.</p>';
-    };
-    search.addEventListener('input',render);
-    render();
-  } catch {
-    grid.innerHTML = notice('The public collection could not be loaded. Try again in a moment.');
   }
+  search.addEventListener('input',()=>{
+    if (search.value.trim()) url.searchParams.set('q',search.value.trim());
+    else url.searchParams.delete('q');
+    history.replaceState(null,'',url);
+    const revision=++version;
+    clearTimeout(timer);
+    grid.setAttribute('aria-busy','true');
+    timer=setTimeout(()=>render(revision),180);
+  });
+  await render(version);
 }
 
 function filterDishes() {
@@ -270,6 +280,7 @@ function privacy() {
     `<div class="panel privacy">
       <h3>Public menus</h3><p>Generating a visual menu requires permission to publish it. The finished page includes the restaurant name and address, menu date, transcribed dishes and prices, AI dish images, and the original menu photos. It can be browsed or shared by link.</p>
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Remove private details from the photos before uploading.</p>
+      <p>Before upload, OpenAI uses the restaurant name and entered address to search public sources for the correct branch.</p>
       <p>OpenAI reads your menu photos. Photos stay private while the menu is being prepared. If reading fails, you can retry from the same browser within 24 hours of uploading. The menu and its illustrations become public with the first dish photo. The original pages become public in the Original menu section once all illustrations are ready. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
       <p>Save the menu link to return to your draft. A cookie lets you open it in the browser you used to upload.</p>
       <p>Menu Lens stores the requesting IP address and its approximate city, when supplied by Cloudflare, alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
@@ -431,6 +442,7 @@ function locationStep() {
   flow.insertAdjacentHTML('beforeend',`
     <h2>Find the restaurant</h2><p class="muted">Search by name, then choose a branch to fill in its location.</p>
     <form id="location-form" class="fields">
+      <fieldset id="restaurant-fields" class="restaurant-fields">
       <label class="field">Restaurant name<input class="control" id="restaurant-name" required maxlength="180" enterkeyhint="search" value="${escape(state.name)}" placeholder="e.g. Ortega Fish Shack"></label>
       <div class="inline-actions">
         <button type="button" class="btn quiet small" id="place-search">${icon('search')} Search restaurants</button>
@@ -439,16 +451,18 @@ function locationStep() {
       </div>
       <div id="place-results" class="search-results" aria-live="polite"></div>
       <p id="location-status" class="field-hint" aria-live="polite"></p>
-      <label class="field">Restaurant address or map location<input class="control" id="restaurant-address" required maxlength="400" value="${escape(state.address)}" placeholder="Street address, city"></label>
+      <label class="field">Restaurant address <span class="field-hint">Optional. A street or suburb helps identify the branch.</span><input class="control" id="restaurant-address" maxlength="400" value="${escape(state.address)}" placeholder="Street address, city"></label>
       <details id="pin-details"><summary class="field-hint">Restaurant map pin</summary>
         <label class="field">Map coordinates <span class="field-hint">Copy latitude and longitude from the restaurant pin.</span>
           <input class="control" id="pin-coordinates" value="${escape(state.manualPin || '')}" placeholder="-41.294, 174.784" autocomplete="off">
         </label>
       </details>
       <label class="field">Date photographed<input class="control" type="date" id="menu-date" min="1900-01-01" max="${localDate()}" required value="${escape(state.date)}"></label>
-      <div id="distance"></div>
+      <div id="distance"></div></fieldset>
+      <p class="field-hint">We check the restaurant name and address against public sources before uploading your photos.</p>
       <p>By choosing <strong>Generate &amp; publish</strong>, you agree to make the restaurant details, dish prices and your original menu photos public. Your menu is public as soon as the first dish photo is ready. The original pages appear when all illustrations are ready. Only upload photos you have permission to share.</p>
       <div id="challenge" aria-label="Human verification"></div>
+      <div id="address-review" hidden></div>
       ${progressFeedback('transfer-progress')}<p class="error" id="step-error" role="alert" hidden></p>
       <div class="form-actions"><button type="button" class="btn text back" id="back">${icon('back')} Photos</button>
         <button type="submit" id="generate" class="btn primary" disabled>${icon('sparkles')} Generate &amp; publish</button></div>
@@ -604,13 +618,62 @@ function loadTurnstile() {
   });
   return turnstileScript;
 }
+function showAddressReview(review,check,restaurant) {
+  const copy={
+    ambiguous:['Which branch is on your menu?', 'Choose the location where this menu was photographed.'],
+    mismatch:['Check the restaurant address', 'We found a published address for this restaurant. Choose the address to show on the menu.'],
+    unverified:['Confirm the restaurant address', 'We couldn’t verify this location from public sources. You can confirm it yourself and continue.'],
+  };
+  const [title,hint]=copy[check.status];
+  const options=check.options.map(({label,address,sourceUrl},i)=>`
+    <div class="address-option"><label><input type="radio" name="address-choice" value="${i}">
+      <span><strong>${escape(label)}</strong><span>${escape(address)}</span></span></label>
+      <a class="text-link address-source" href="${escape(sourceUrl)}" target="_blank" rel="noopener noreferrer">Source · ${escape(new URL(sourceUrl).hostname.replace(/^www\./,''))}</a></div>`).join('');
+  review.innerHTML=`<fieldset class="address-panel" aria-describedby="address-hint">
+    <legend tabindex="-1">${title}</legend><p id="address-hint" class="muted">${hint}</p>
+    ${options}
+    <div class="address-option"><label><input type="radio" name="address-choice" value="entered">
+      <span><strong>${restaurant.address?'Use the address I entered':'Confirm an address myself'}</strong>
+      ${restaurant.address?'<span>'+escape(restaurant.address)+'</span>':''}</span></label>
+      ${restaurant.address?'':'<label class="field manual-address" hidden>Restaurant street address<input id="confirmed-address" class="control" maxlength="400" placeholder="Street address, city"></label>'}</div>
+    <button type="button" id="edit-restaurant" class="text-link">Edit restaurant details</button></fieldset>`;
+  review.hidden=false;
+  review.querySelector('legend').focus();
+}
 async function setupGeneration(form) {
   const target=$('#challenge',form);
   const error=$('#step-error',form);
   const button=$('#generate',form);
   const back=$('#back',form);
-  let token='',widget,busy=false;
-  function sync(){ button.disabled=busy || !token; }
+  const fields=$('#restaurant-fields',form);
+  const review=$('#address-review',form);
+  let token='',widget,busy=false,verified=null,confirmed=false;
+  const selected=()=>review.querySelector('input[name="address-choice"]:checked')?.value;
+  function sync() {
+    const manual=$('#confirmed-address',form);
+    const choice=selected();
+    if (manual) manual.closest('label').hidden=choice!=='entered';
+    const canSubmit=verified ? confirmed || (choice!==undefined && (choice!=='entered' || !manual || manual.value.trim())) : token;
+    button.disabled=busy || !canSubmit;
+    back.disabled=busy;
+    const panel=review.querySelector('fieldset');
+    if (panel) panel.disabled=busy;
+  }
+  function editRestaurant() {
+    verified=null;
+    confirmed=false;
+    fields.disabled=false;
+    review.hidden=true;
+    review.replaceChildren();
+    target.hidden=false;
+    token='';
+    errorAt(error,'');
+    window.turnstile.reset(widget);
+    button.innerHTML=icon('sparkles')+' Generate &amp; publish';
+    sync();
+    $('#restaurant-address',form).focus();
+  }
+  review.oninput=sync;
   back.onclick=()=>{
     if (busy) return;
     if (widget!==undefined) window.turnstile.remove(widget);
@@ -618,20 +681,39 @@ async function setupGeneration(form) {
   };
   form.onsubmit=async event=>{
     event.preventDefault();
-    if (busy || !token) return;
-    if (state.manualPin.trim() && !restaurantPin()) {
+    if (busy || button.disabled) return;
+    if (!verified && state.manualPin.trim() && !restaurantPin()) {
       errorAt(error,'Use a latitude and longitude separated by a comma, such as -41.294, 174.784.');
       return;
     }
     errorAt(error,'');
     busy=true;
+    fields.disabled=true;
     sync();
-    back.disabled=true;
-    button.textContent='Submitting…';
-    showPhotoProgress('transfer-progress','Verifying submission…');
     try {
-      const verified=await api('/verify',{name:state.name,address:state.address,date:state.date,
-        placeId:state.place?.id,pin:restaurantPin(),consent:true,shareOriginals:true,autoPublish:true,token});
+      if (!verified) {
+        button.textContent='Checking address…';
+        showPhotoProgress('transfer-progress','Checking the restaurant address against public sources…');
+        verified=await api('/verify',{name:state.name,address:state.address,date:state.date,
+          placeId:state.place?.id,pin:restaurantPin(),consent:true,shareOriginals:true,autoPublish:true,token});
+        target.hidden=true;
+        confirmed=verified.addressCheck.status==='match';
+        if (!confirmed) {
+          showPhotoProgress('transfer-progress','');
+          showAddressReview(review,verified.addressCheck,state);
+          $('#edit-restaurant',form).onclick=editRestaurant;
+          button.textContent='Confirm & publish';
+          return;
+        }
+      }
+      if (!confirmed) {
+        const choice=selected();
+        await api('/jobs/'+verified.id+'/confirm-address',{choice:choice==='entered'?choice:Number(choice),
+          address:$('#confirmed-address',form)?.value.trim()});
+        confirmed=true;
+      }
+      review.hidden=true;
+      button.textContent='Submitting…';
       showPhotoProgress('transfer-progress','Preparing upload…');
       const pages=await Promise.all(state.files.map(file=>dataUrl(file.blob)));
       showPhotoProgress('transfer-progress','Uploading photos…');
@@ -642,6 +724,8 @@ async function setupGeneration(form) {
       location.assign('/menu/'+verified.id);
     } catch(err) {
       showPhotoProgress('transfer-progress','');
+      if (!verified) editRestaurant();
+      if (confirmed) button.textContent='Retry upload';
       errorAt(error,err.message);
       if (err.progressPath) {
         const link=document.createElement('a');
@@ -650,12 +734,9 @@ async function setupGeneration(form) {
         link.textContent='Open upload progress';
         error.append(' ',link);
       }
-      token='';
+    } finally {
       busy=false;
-      back.disabled=false;
-      button.innerHTML=icon('sparkles')+' Generate &amp; publish';
       sync();
-      if (widget!==undefined) window.turnstile.reset(widget);
     }
   };
   await configRequest;

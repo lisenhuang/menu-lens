@@ -34,6 +34,9 @@ test('private uploads and approved illustrations finish with no client connected
   let imageCalls=0;
   let readCalls=0;
   let failReading=false;
+  let addressReply=null;
+  let addressRequests=0;
+  const sourceUrl='https://restaurant.example/locations';
   let googleResults=[], placesRequest;
   const provider=createServer(async (req,res)=>{
     const chunks=[];
@@ -56,6 +59,19 @@ test('private uploads and approved illustrations finish with no client connected
     } else if (req.url==='/v1/places:searchText') {
       placesRequest=JSON.parse(body);
       response={places:googleResults};
+    } else if (req.url==='/v1/responses' && JSON.parse(body).tools) {
+      const check=JSON.parse(body);
+      assert.equal(check.tool_choice,'required');
+      const {name,address,...extra}=JSON.parse(check.input);
+      assert.deepEqual(extra,{});
+      assert.equal(check.store,false);
+      addressRequests++;
+      if (addressReply==='offline') {res.statusCode=503;return res.end('{}');}
+      const verdict=addressReply || {status:'match',options:[{label:name,address,sourceUrl}]};
+      response={status:'completed',usage:{input_tokens:100,output_tokens:20},output:[
+        {type:'web_search_call',action:{type:'search',sources:[{url:sourceUrl}]}},
+        {content:[{type:'output_text',text:JSON.stringify(verdict)}]},
+      ]};
     } else if (req.url==='/v1/responses') {
       readingRequest=JSON.parse(body);
       readCalls++;
@@ -263,21 +279,21 @@ test('private uploads and approved illustrations finish with no client connected
   const fresh=await login({pin,token:'admin-history'});
   const historyCookie=fresh.headers.getSetCookie()[0].split(';')[0];
   const {runs}=await (await request('/api/admin/history',historyCookie)).json();
-  const [run]=runs;
-  assert.equal(runs.length,1);
+  const run=runs.find(run=>run.id===first.id);
+  assert.equal(runs.length,2);
   assert.equal(run.id,first.id);
   assert.equal(run.uploadIp,'192.0.2.45');
   assert.equal(run.imageIp,'2001:db8::7');
   assert.equal(run.ipCity,'Whangārei');
   assert.equal(run.state,'complete');
-  assert.equal(run.priced,2);
-  assert.equal(run.attempts,5);
-  assert.ok(Math.abs(run.usd-0.037272)<1e-9);
+  assert.equal(run.priced,3);
+  assert.equal(run.attempts,6);
+  assert.ok(Math.abs(run.usd-(0.037272+0.0102))<1e-9);
   const {calls}=await (await request('/api/admin/history/'+first.id,historyCookie)).json();
-  assert.deepEqual(calls.map(x=>x.state),['interrupted','complete','interrupted','failed','complete']);
-  assert.deepEqual(calls.map(x=>x.basis),['unknown','usage','unknown','unknown','usage']);
-  assert.equal(calls[1].model,newSettings.readingModel);
-  assert.equal(calls[1].level,newSettings.reasoning);
+  assert.deepEqual(calls.map(x=>x.state),['complete','interrupted','complete','interrupted','failed','complete']);
+  assert.deepEqual(calls.map(x=>x.basis),['usage','unknown','usage','unknown','unknown','usage']);
+  assert.equal(calls[2].model,newSettings.readingModel);
+  assert.equal(calls[2].level,newSettings.reasoning);
   assert.equal(calls[0].ip,'192.0.2.45');
   assert.equal(calls.at(-1).ip,'2001:db8::7');
   assert.equal((await request('/api/admin/history/'+first.id)).status,401);
@@ -444,6 +460,71 @@ test('private uploads and approved illustrations finish with no client connected
     assert.equal((html.match(/class="menu-card-link"/g)||[]).length,menus.length);
     for (const menu of menus) assert.ok(html.includes('class="menu-card-link" href="/menu/'+menu.id+'"'));
     assert.ok(!html.includes('data-view-image'));
+  });
+  await t.test('Explore searches the full public menu and shows matching dishes',async()=>{
+    const catalog=new DatabaseSync(join(dir,'menu.sqlite'));
+    const id='eeeeeeeeeeeeeeeeeeee';
+    const row=catalog.prepare('SELECT payload FROM menus WHERE id=?').get(id);
+    const payload=JSON.parse(row.payload);
+    payload.dishes=[{name:'Salmon sushi',section:'Mains',description:'Seasoned rice and salmon',price:'$16'}];
+    payload.notes='Takeaway available';
+    catalog.prepare('UPDATE menus SET payload=? WHERE id=?').run(JSON.stringify(payload),id);
+    catalog.close();
+    for (const query of ['SUSHI','rice','mains','rice salmon','test kitchen rice']) {
+      const result=await (await request('/api/menus?q='+encodeURIComponent(query))).json();
+      assert.deepEqual(result.map(menu=>menu.id),[id]);
+      assert.deepEqual(result[0].matchedDishes,['Salmon sushi']);
+    }
+    assert.ok((await (await request('/api/menus?q=takeaway')).json()).some(menu=>menu.id===id));
+    assert.deepEqual(await (await request('/api/menus?q=sushi%20missingingredient')).json(),[]);
+    assert.match(await (await request('/')).text(),/class="source-link"[^>]+target="_blank"[^>]+noopener/);
+  });
+  await t.test('address checks gate generation and preserve the selected branch on retry',async()=>{
+    const ip='192.0.2.123';
+    async function begin(address) {
+      const reply=await request('/api/verify','',{name:'Branch Cafe',address,pin:restaurantPin,placeId:'old-place',
+        date:'2025-01-01',consent:true,shareOriginals:true,token:'test'},ip);
+      assert.equal(reply.status,200);
+      const {id,addressCheck}=await reply.json();
+      const cookie=reply.headers.getSetCookie().find(value=>value.startsWith('ml_job=')).split(';')[0];
+      return {id,addressCheck,post:(action,body,auth=cookie)=>request('/api/jobs/'+id+'/'+action,auth,body,ip)};
+    }
+    const options=['12 Jellicoe Street','30 Enfield Street'].map(address=>({label:'Branch Cafe',address,sourceUrl}));
+    addressReply={status:'mismatch',options:options.slice(0,1)};
+    const wrong=await begin('99 Wrong Street');
+    assert.deepEqual(wrong.addressCheck,addressReply);
+    const reads=readCalls;
+    assert.equal((await wrong.post('upload',{pages:[photo]})).status,409);
+    assert.equal(readCalls,reads);
+    assert.equal((await wrong.post('confirm-address',{choice:0},first.cookie)).status,403);
+    assert.equal((await wrong.post('confirm-address',{choice:7})).status,400);
+    assert.equal((await wrong.post('confirm-address',{choice:0})).status,200);
+    assert.equal((await wrong.post('confirm-address',{choice:0})).status,200);
+    assert.equal((await wrong.post('confirm-address',{choice:'entered'})).status,409);
+    assert.equal((await wrong.post('upload',{pages:[photo]})).status,202);
+    const catalog=new DatabaseSync(join(dir,'menu.sqlite'));
+    const saved=catalog.prepare("SELECT details FROM sessions JOIN drafts ON sessions.id=drafts.owner WHERE drafts.id=?").get(wrong.id);
+    const restaurant=JSON.parse(saved.details).restaurant;
+    assert.equal(restaurant.address,options[0].address);
+    assert.equal(restaurant.placeId,'');
+    assert.equal(restaurant.pin,undefined);
+    catalog.close();
+    addressReply={status:'ambiguous',options};
+    const branches=await begin('');
+    assert.deepEqual(branches.addressCheck,addressReply);
+    assert.equal((await branches.post('confirm-address',{choice:1})).status,200);
+    addressReply={status:'mismatch',options:[{...options[0],sourceUrl:'https://uncited.example/venue'}]};
+    const uncertain=await begin('7 Local Street');
+    assert.deepEqual(uncertain.addressCheck,{status:'unverified',options:[]});
+    assert.equal((await uncertain.post('confirm-address',{choice:'entered'})).status,200);
+    addressReply='offline';
+    const offline=await begin('');
+    assert.equal(offline.addressCheck.status,'unverified');
+    assert.equal((await offline.post('confirm-address',{choice:'entered',address:''})).status,400);
+    assert.equal((await offline.post('confirm-address',{choice:'entered',address:'8 Local Street'})).status,200);
+    const before=addressRequests;
+    assert.equal((await request('/api/verify','',{name:'Bot',address:'Auckland',date:'2025-01-01',consent:true,shareOriginals:true,token:''},ip)).status,403);
+    assert.equal(addressRequests,before);
   });
   assert.equal((await request('/fonts/dm-sans-OFL.txt')).status,200);
   assert.equal((await request('/api/verify','',{name:'Consent test',consent:true,locationConfirmed:true})).status,403);

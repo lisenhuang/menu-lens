@@ -7,7 +7,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {existsSync, mkdirSync, readFileSync} from 'node:fs';
 import {dirname, extname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {generateDish, googlePlaces, readMenu, RequestError, verifyPerson} from './providers.mjs';
+import {addressModel, addressEffort, checkRestaurantAddress, generateDish, googlePlaces, readMenu, RequestError, verifyPerson} from './providers.mjs';
 
 import {generationHistory} from './usage.mjs';
 import {defaultReader, defaultReadingEffort, imageModels, matchesPin, outputUsdPerMillion, readingModels, validateSettings} from './admin.mjs';
@@ -288,7 +288,7 @@ function details(body) {
   const date = clean(body.date,10,'Menu date');
   const calendar = new Date(date+'T00:00:00.000Z');
   const tomorrow = new Date(Date.now()+86_400_000).toISOString().slice(0,10);
-  if (!name || !address) throw new RequestError(400,'Enter the restaurant name and select its location or enter an address.');
+  if (!name) throw new RequestError(400,'Enter the restaurant name.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(calendar.getTime()) || calendar.toISOString().slice(0,10) !== date || date > tomorrow || date < '1900-01-01') {
     throw new RequestError(400,'Enter the date the menu was photographed.');
   }
@@ -305,6 +305,25 @@ function details(body) {
   return {restaurant,date,autoPublish:body.autoPublish===true,shareOriginals:body.shareOriginals===true,consentAt:new Date().toISOString()};
 }
 
+function confirmAddress(owner,body) {
+  const session=db.prepare('SELECT details FROM sessions WHERE id=? AND expires>?').get(owner,Date.now());
+  if (!session) throw new RequestError(403,'Your address check has expired. Start a new submission.');
+  const info=JSON.parse(session.details);
+  const check=info.addressCheck;
+  const choice=body.choice;
+  if (!check || check.status==='match') throw new RequestError(409,'This restaurant address is already confirmed.');
+  const manual=choice==='entered' && !check.entered ? clean(body.address,400,'Restaurant address') : '';
+  if (check.choice!==null) {
+    if (check.choice===choice && (!manual || manual===info.restaurant.address)) return;
+    throw new RequestError(409,'A different address was already confirmed for this menu.');
+  }
+  const address=choice==='entered' ? check.entered || manual : Number.isInteger(choice) && check.options[choice]?.address;
+  if (!address) throw new RequestError(400,'Choose a listed branch or confirm a street address.');
+  if (address!==info.restaurant.address) info.restaurant=details({name:info.restaurant.name,address,date:info.date}).restaurant;
+  check.choice=choice;
+  db.prepare('UPDATE sessions SET details=? WHERE id=?').run(JSON.stringify(info),owner);
+}
+
 function menuText(body) {
   if (!Array.isArray(body.dishes) || body.dishes.length < 1 || body.dishes.length > maxDishes) {
     throw new RequestError(400,`A submission needs between 1 and ${maxDishes} dishes. For a larger menu, use a set of pages at a time.`);
@@ -318,16 +337,44 @@ function menuText(body) {
   return {dishes,notes:clean(body.notes,9000,'Menu notes'),transcript:clean(body.transcript,65000,'Original information')};
 }
 
-function card(row,first=row.firstPhoto ?? 0) {
-  const {restaurant,dishes}=JSON.parse(row.payload);
+function card(row,first=row.firstPhoto ?? 0,{restaurant,dishes}=JSON.parse(row.payload)) {
   return {id:row.id,restaurant,date:row.date,published:row.created,cover:`/media/${row.id}/${first}.webp`,
     state:row.state,count:dishes.length,completed:row.completed ?? dishes.length};
 }
-function publicCards() {
+function menuSearchText(value) {
+  return normalize(value.normalize('NFKD').replace(/\p{M}/gu,''));
+}
+function publicCards(query='') {
   const rows=db.prepare(`SELECT menus.*,min(position) AS firstPhoto,count(position) AS completed
       FROM menus JOIN dish_objects ON menu_id=menus.id GROUP BY menus.id
       ORDER BY date DESC,created DESC,menus.id`).all();
-  return rows.map(row=>card(row));
+  const terms=menuSearchText(query).split(' ').filter(Boolean);
+  if (!terms.length) return rows.map(row=>card(row));
+  const results=[];
+  for (const row of rows) {
+    const payload=JSON.parse(row.payload);
+    const venue=menuSearchText(payload.restaurant.name+' '+payload.restaurant.address);
+    const needed=terms.filter(term=>!venue.includes(term));
+    const notes=menuSearchText(payload.notes || '');
+    const matched=new Set();
+    const names=[];
+    for (const dish of payload.dishes) {
+      const text=menuSearchText([dish.name,dish.description,dish.section,dish.price].filter(Boolean).join(' '));
+      const hits=needed.filter(term=>containsMenuTerm(text,term));
+      if (hits.length) {
+        hits.forEach(term=>matched.add(term));
+        if (names.length<3) names.push(dish.name);
+      }
+    }
+    if (needed.every(term=>matched.has(term) || containsMenuTerm(notes,term))) {
+      results.push({...card(row,row.firstPhoto,payload),matchedDishes:names});
+    }
+  }
+  return results;
+}
+function containsMenuTerm(text,term) {
+  if (/^[a-z0-9]+$/.test(term)) return (' '+text).includes(' '+term);
+  return text.includes(term);
 }
 function publicMenu(row) {
   if (!row) return null;
@@ -546,7 +593,8 @@ async function submitPages(req,id,owner,body) {
   const existing=db.prepare('SELECT state FROM drafts WHERE id=? UNION ALL SELECT state FROM menus WHERE id=?').get(id,id);
   if (existing?.state==='uploading') throw new RequestError(409,'Your upload is still in progress.');
   if (existing) return;
-  const {autoPublish,shareOriginals,restaurant}=JSON.parse(owner.details);
+  const {autoPublish,shareOriginals,restaurant,addressCheck}=JSON.parse(owner.details);
+  if (addressCheck && addressCheck.choice===null) throw new RequestError(409,'Confirm the restaurant address before uploading photos.');
   if (!shareOriginals) throw new RequestError(403,'Start a new submission to confirm sharing the original photos.');
   validatePages(body);
   const prefix='originals/'+randomBytes(16).toString('hex')+'/';
@@ -616,6 +664,10 @@ async function jobApi(req,res,id,action) {
     if (row && ['publish','upload'].includes(action)) return write(res,202,{id});
     const active = db.prepare('SELECT * FROM sessions WHERE id=? AND expires>?').get(owner,Date.now());
     if (!active) throw new RequestError(403,'Your upload has expired. Start a new submission.');
+    if (action==='confirm-address') {
+      confirmAddress(owner,await json(req,2048));
+      return write(res,200,{ok:true});
+    }
     if (action==='retry-read') return retryReading(req,res,id,owner);
     if (action==='publish') return publish(req,res,id,active);
     if (action==='upload') {
@@ -682,7 +734,8 @@ async function api(req,res,path) {
     generation:ready, places:Boolean(environment.GOOGLE_PLACES_API_KEY || nzPlaces.length),maxDishes,
   });
   if (path === '/api/menus' && get) {
-    return write(res,200,publicCards());
+    const query=new URL(req.url,'http://localhost').searchParams.get('q') || '';
+    return write(res,200,publicCards(clean(query,180,'Menu search')));
   }
   const menuId = path.match(/^\/api\/menus\/([a-f0-9]{20})$/)?.[1];
   if (menuId && get) {
@@ -690,7 +743,7 @@ async function api(req,res,path) {
     if (!menu) throw new RequestError(404,'This menu could not be found.');
     return write(res,200,menu);
   }
-  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|retry-read|retry|photos\/[0-5]))?$/);
+  const job = path.match(/^\/api\/jobs\/([a-f0-9]{20})(?:\/(events|review|upload|publish|confirm-address|retry-read|retry|photos\/[0-5]))?$/);
   if (job) return jobApi(req,res,job[1],job[2]);
   if (req.method !== 'POST') throw new RequestError(404,'This page could not be found.');
   if (path === '/api/places') {
@@ -719,10 +772,21 @@ async function api(req,res,path) {
     const info = details(body);
     await verifyPerson(body.token,clientIp(req));
     const token = randomBytes(32).toString('hex');
+    const id = submissionId(sha(token));
+    const ip=clientIp(req);
+    history.register(id,info.restaurant.name,ip);
+    recordRequestCity(id,req);
+    let verdict;
+    try {
+      verdict=await history.measure(id,'address','Restaurant address check',addressModel,addressEffort,
+        received=>checkRestaurantAddress(info.restaurant,received),ip);
+    } catch {
+      verdict={status:'unverified',options:[]};
+    }
+    info.addressCheck={...verdict,entered:info.restaurant.address,choice:verdict.status==='match' ? 'matched' : null};
     db.prepare('INSERT INTO sessions(id,expires,details) VALUES (?,?,?)').run(sha(token),Date.now()+86_400_000,JSON.stringify(info));
     const secure = liveOrigin.startsWith('https:') ? '; Secure' : '';
-    const id = submissionId(sha(token));
-    return write(res,200,{ok:true,id},undefined,{'Set-Cookie':[
+    return write(res,200,{ok:true,id,addressCheck:verdict},undefined,{'Set-Cookie':[
       `ml_session=${token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=86400${secure}`,
       `ml_job=${token}; Path=/api/jobs/${id}; HttpOnly; SameSite=Strict; Max-Age=2592000${secure}`,
     ]});

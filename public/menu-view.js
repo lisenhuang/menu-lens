@@ -28,7 +28,8 @@ export function listing(menu) {
   return `<article class="dish-card menu-card"><a class="menu-card-link" href="/menu/${escape(menu.id)}" aria-label="View ${escape(menu.restaurant.name)} menu">
     <div class="dish-image"><img src="${escape(menu.cover)}" alt="" width="780" height="500" loading="lazy"></div>
     <div class="dish-body"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
-    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p></div></div></a></article>`;
+    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}${menu.state!=='complete' && Number.isInteger(menu.completed) ? ` · ${menu.completed} photos ready` : ''}</p>
+    ${menu.matchedDishes?.length ? `<p class="menu-matches"><strong>On the menu</strong> ${menu.matchedDishes.map(escape).join(' · ')}</p>` : ''}</div></div></a></article>`;
 }
 function dishCard(dish) {
   return `<article class="dish-card" id="${escape(dish.id)}" data-position="${dish.position}">${dishMedia(dish)}
