@@ -1,5 +1,5 @@
 import {icons} from './icons.js?v=3';
-import {dateLabel, dishMedia, escape, icon, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=1';
+import {dateLabel, dishMedia, escape, icon, mapsLink, notice, pagesBack, pinText, progressText, renderMenu} from './menu-view.js?v=2';
 
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#modal');
@@ -292,7 +292,7 @@ function privacy() {
       <p>Menu Lens stores the requesting IP address and its approximate city, when supplied by Cloudflare, alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
       <p>Cloudflare Turnstile verifies submissions. Searching in Google Maps sends your query to Google.</p>
-      <p>New Zealand restaurant search uses <a class="text-link" href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>. The <a class="text-link" href="/data/nz-restaurants.json">New Zealand restaurant index</a> is available under the Open Database Licence.</p>
+      <h3 id="map-credits">Map data credits</h3><p>New Zealand restaurant search uses <a class="text-link" href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>. The <a class="text-link" href="/data/nz-restaurants.json">New Zealand restaurant index</a> is available under the Open Database Licence.</p>
     </div>`);
 }
 

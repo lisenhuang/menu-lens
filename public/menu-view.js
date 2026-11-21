@@ -53,7 +53,6 @@ export function renderMenu(menu) {
     <section class="menu-cover"><div class="menu-cover-copy"><p class="eyebrow page-kicker">COMMUNITY VISUAL MENU</p>
     <h1 class="page-title">${escape(menu.restaurant.name)}</h1>
     <p class="page-intro">${escape(menu.restaurant.address)}</p>
-    ${menu.restaurant.placeId?.startsWith('osm-') ? '<a class="field-hint" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>' : ''}
     <p class="hero-note">${icon('calendar')} Photographed ${dateLabel(menu.date)}</p>
     <div class="inline-actions"><button type="button" class="btn primary" id="share">${icon('link')} Copy link</button>
     ${mapsLink(menu.restaurant.name,menu.restaurant.address,menu.restaurant.placeId,menu.restaurant.pin)}
