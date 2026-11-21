@@ -30,6 +30,10 @@ export function generationHistory(db) {
       seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, restaurant TEXT NOT NULL,
       recorded TEXT NOT NULL, upload_ip TEXT, image_ip TEXT, legacy INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS generation_cities (
+      run_id TEXT NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
+      ip TEXT NOT NULL, city TEXT NOT NULL, PRIMARY KEY(run_id,ip)
+    );
     CREATE TABLE IF NOT EXISTS generation_calls (
       seq INTEGER PRIMARY KEY, run_id TEXT NOT NULL REFERENCES generation_runs(id), started TEXT NOT NULL,
       kind TEXT NOT NULL, label TEXT NOT NULL, model TEXT NOT NULL, level TEXT NOT NULL, ip TEXT,
@@ -44,6 +48,10 @@ export function generationHistory(db) {
         json_extract(sessions.details,'$.consentAt'),1 FROM drafts JOIN sessions ON sessions.id=drafts.owner;
   `);
   const newRun=db.prepare('INSERT OR IGNORE INTO generation_runs (id,restaurant,recorded,upload_ip) VALUES (?,?,?,?)');
+  const saveCity=db.prepare('INSERT OR IGNORE INTO generation_cities (run_id,ip,city) VALUES (?,?,?)');
+  function recordCity(id,ip,city) {
+    if (city && validIp(ip)) saveCity.run(id,ip,city);
+  }
   const startCall=db.prepare(`INSERT INTO generation_calls
     (run_id,started,kind,label,model,level,ip,state) SELECT id,?,?,?,?,?,CASE WHEN ?='read' THEN COALESCE(?,upload_ip) ELSE image_ip END,'running'
     FROM generation_runs WHERE id=? RETURNING seq`);
@@ -73,13 +81,14 @@ export function generationHistory(db) {
     const rows=db.prepare(`WITH page AS (
       SELECT * FROM generation_runs WHERE seq<? ORDER BY seq DESC LIMIT 21
     )
-    SELECT p.seq,p.id,p.restaurant,p.recorded,p.upload_ip AS uploadIp,p.image_ip AS imageIp,p.legacy,
+    SELECT p.seq,p.id,p.restaurant,p.recorded,p.upload_ip AS uploadIp,p.image_ip AS imageIp,geo.city AS ipCity,p.legacy,
       COALESCE(m.state,d.state,'unpublished') AS state,
       CASE WHEN p.legacy THEN (SELECT count(*) FROM dish_objects WHERE menu_id=p.id) END AS savedImages,
       CASE WHEN p.legacy THEN json_extract(m.payload,'$.imageSettings') END AS oldSettings,
       count(c.seq) AS attempts,SUM(c.usd) AS usd,count(c.usd) AS priced,
       count(CASE WHEN c.basis='output estimate' THEN 1 END) AS estimates
     FROM page p LEFT JOIN menus m ON m.id=p.id LEFT JOIN drafts d ON d.id=p.id
+    LEFT JOIN generation_cities geo ON geo.run_id=p.id AND geo.ip=COALESCE(p.upload_ip,p.image_ip)
     LEFT JOIN generation_calls c ON c.run_id=p.id
     GROUP BY p.seq ORDER BY p.seq DESC`).all(before);
     const more=rows.length>20;
@@ -98,5 +107,5 @@ export function generationHistory(db) {
     return db.prepare(`SELECT started,kind,label,model,level,ip,state,usd,basis FROM generation_calls
       WHERE run_id=? ORDER BY seq`).all(id);
   }
-  return {register,imageRequester,measure,list,calls};
+  return {register,recordCity,imageRequester,measure,list,calls};
 }

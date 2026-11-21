@@ -151,6 +151,14 @@ function clientIp(req) {
   return environment.TRUST_CLOUDFLARE === '1' ? req.headers['cf-connecting-ip'] || '' : req.socket.remoteAddress;
 }
 
+function recordRequestCity(id,req) {
+  const raw=req.headers['cf-ipcity'];
+  if (environment.TRUST_CLOUDFLARE!=='1' || typeof raw!=='string' || raw.length>512) return;
+  // Node exposes header bytes as Latin-1. Cloudflare sends city names in UTF-8.
+  const city=Buffer.from(raw,'latin1').toString('utf8').trim();
+  if (city && !/[\p{Cc}\p{Cf}\uFFFD]/u.test(city)) history.recordCity(id,clientIp(req),city);
+}
+
 function rate(id, limit, ttl, quantity=1) {
   const now = Date.now();
   if (!Number.isSafeInteger(limit) || limit < 1 || quantity > limit) return false;
@@ -470,6 +478,7 @@ async function publish(req,res,id,owner) {
   if (body.useTranscription!==true && body.reviewed!==true) throw new RequestError(403,'Choose Generate & publish to share this draft.');
   checkImageQueue();
   enqueueMenu({...draft,details:owner.details},body.useTranscription===true ? JSON.parse(draft.result) : body,clientIp(req));
+  recordRequestCity(id,req);
   return write(res,202,{id});
 }
 function enqueueMenu(draft,output,requestIp) {
@@ -498,6 +507,7 @@ function retryImages(req,res,id,owner) {
   const retried = db.prepare("UPDATE menus SET state='queued', attempts=attempts+1 WHERE id=? AND owner=? AND state='error' AND attempts<3").run(id,owner);
   if (!retried.changes) throw new RequestError(409,'This menu cannot be retried right now.');
   history.imageRequester(id,clientIp(req));
+  recordRequestCity(id,req);
   notifyProgress(id);
   queue();
   return write(res,202,{ok:true});
@@ -524,6 +534,7 @@ async function submitPages(req,id,owner,body) {
       await putObject(keys[i],Buffer.from(page.split(',')[1],'base64'),'image/jpeg');
     }
     history.register(id,restaurant.name,clientIp(req));
+    recordRequestCity(id,req);
     db.prepare("UPDATE drafts SET state='waiting' WHERE id=?").run(id);
     notifyProgress(id);
   } catch(error) {
@@ -544,6 +555,7 @@ async function retryReading(req,res,id,owner) {
     if (attempt===draft.reads) {
       if (draft.state!=='read_error' || !draft.pageCount) throw new RequestError(409,'This draft has no failed read with saved photos to retry.');
       reserveRead(owner,JSON.parse(draft.details).autoPublish);
+      recordRequestCity(id,req);
       db.prepare("UPDATE drafts SET state='waiting',error=NULL,read_ip=? WHERE id=?").run(clientIp(req),id);
     }
     db.exec('COMMIT');

@@ -113,8 +113,9 @@ test('private uploads and approved illustrations finish with no client connected
     });
     await until(()=>fetch(origin+'/healthz').then(r=>r.ok).catch(()=>false));
   }
-  function request(path,cookie='',body,ip='192.0.2.45') {
+  function request(path,cookie='',body,ip='192.0.2.45',city) {
     const headers={cookie,origin,'cf-connecting-ip':ip,'content-type':'application/json'};
+    if (city) headers['cf-ipcity']=Buffer.from(city,'utf8').toString('latin1');
     return fetch(origin+path,{headers,method:body?'POST':'GET',body:body&&JSON.stringify(body)});
   }
   async function events(path,cookie='') {
@@ -190,7 +191,7 @@ test('private uploads and approved illustrations finish with no client connected
   const restaurantPin={lat:-41.3,lng:174.7};
   const first=await verify('Test kitchen',restaurantPin);
   const api='/api/jobs/'+first.id;
-  assert.equal((await request(api+'/upload',first.cookie,{pages:[photo]})).status,202);
+  assert.equal((await request(api+'/upload',first.cookie,{pages:[photo]},'192.0.2.45','Whangārei')).status,202);
   const retiredPage=await fetch(origin+'/submissions',{redirect:'manual'});
   assert.equal(retiredPage.status,301);
   assert.equal(retiredPage.headers.get('location'),'/explore');
@@ -236,7 +237,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal((await request(api+'/retry',second.cookie,{})).status,403);
   assert.equal((await (await request(api,first.cookie)).json()).canRetry,true);
   imageFails=false;
-  assert.equal((await request(api+'/retry',first.cookie,{},'2001:db8::7')).status,202);
+  assert.equal((await request(api+'/retry',first.cookie,{},'2001:db8::7','Wellington')).status,202);
   await until(async()=> (await (await request(api)).json()).state==='complete');
   const result=await (await request('/api/menus/'+first.id)).json();
   assert.deepEqual(result.restaurant.pin,restaurantPin);
@@ -250,6 +251,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(run.id,first.id);
   assert.equal(run.uploadIp,'192.0.2.45');
   assert.equal(run.imageIp,'2001:db8::7');
+  assert.equal(run.ipCity,'Whangārei');
   assert.equal(run.state,'complete');
   assert.equal(run.priced,2);
   assert.equal(run.attempts,5);
@@ -260,6 +262,7 @@ test('private uploads and approved illustrations finish with no client connected
   assert.equal(calls[0].ip,'192.0.2.45');
   assert.equal(calls.at(-1).ip,'2001:db8::7');
   assert.equal((await request('/api/admin/history/'+first.id)).status,401);
+  assert.ok(!JSON.stringify(result).includes('Whangārei'));
   assert.ok(!JSON.stringify(result).includes('192.0.2.45') && !JSON.stringify(result).includes('2001:db8::7'));
   assert.equal(result.dishes[0].price,'$9');
   assert.equal(result.transcript,undefined);
@@ -374,6 +377,8 @@ test('private uploads and approved illustrations finish with no client connected
     assert.equal(result.dishes[0].name,'Soup');
     assert.equal(result.dishes[0].price,'$9');
     assert.equal(result.originals.length,1);
+    const {runs}=await (await request('/api/admin/history',historyCookie)).json();
+    assert.equal(runs.find(run=>run.id===auto.id).ipCity,null);
     assert.equal((await upload()).status,202);
     assert.equal(imageCalls,beforeImages+1);
     assert.equal(readCalls,startReads+2);

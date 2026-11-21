@@ -129,7 +129,7 @@ export async function openAdmin({api,page,loadTurnstile,escape}) {
       return `<details class="history-run" data-run="${escape(run.id)}"><summary>
         <span><strong>${escape(run.restaurant)}</strong><small>${escape(when(run.recorded))} · ${escape(run.state)}</small></span>
         <span class="history-price"><strong>${amount}</strong><small>${basis}</small></span></summary>
-        <div class="history-details"><p><strong>IP address</strong> ${escape(run.uploadIp || run.imageIp || 'Not recorded')}</p>
+        <div class="history-details"><p><strong>IP address</strong> ${escape(run.uploadIp || run.imageIp || 'Not recorded')} · <strong>City</strong> ${escape(run.ipCity || 'Not recorded')}</p>
         ${reference}<div class="history-calls"></div></div></details>`;
     }
     function callRow(call) {

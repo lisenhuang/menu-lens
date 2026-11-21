@@ -14,8 +14,8 @@
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/theme.js"></script>
-  <link rel="stylesheet" href="/style.css?v=11">
-  <script type="module" src="/app.js?v=12"></script>
+  <link rel="stylesheet" href="/style.css?v=12">
+  <script type="module" src="/app.js?v=13"></script>
 </head>
 <body>
   <a href="#main" class="skip">Skip to content</a>
@@ -52,7 +52,7 @@
         <p class="hero-note"><span data-icon="globe"></span> Every finished menu is shared with the community.</p>
       </div>
       <figure class="hero-figure">
-        <img class="hero-image" src="/images/hero.webp" alt="Pappardelle with slow-cooked ragù, parmesan and fresh basil" fetchpriority="high" width="1450" height="967">
+        <a class="hero-photo" data-view-image aria-haspopup="dialog" href="/images/hero.webp"><img class="hero-image" src="/images/hero.webp" alt="Pappardelle with slow-cooked ragù, parmesan and fresh basil" fetchpriority="high" width="1450" height="967"></a>
         <span class="photo-badge"><span data-icon="sparkles"></span> AI illustration</span>
         <figcaption><span class="hero-caption-icon" data-icon="utensils"></span><strong>Pappardelle al ragù</strong></figcaption>
       </figure>
@@ -75,6 +75,12 @@
   </main>
   <footer class="footer"><div class="shell"><a href="/" class="brand"><img src="/mark.svg" alt="" width="30" height="30"><span>menu<span class="brand-accent">lens</span><i>.</i></span></a><p>Made in Aotearoa, for curious diners.</p><a href="/explore">Explore menus</a><a href="/privacy">Privacy</a></div></footer>
   <dialog id="modal"></dialog>
+  <dialog id="image-viewer" aria-label="Full-screen image">
+    <div class="image-stage">
+      <img alt="">
+      <button type="button" class="icon-button" aria-label="Close full-screen image" autofocus><span data-icon="close"></span></button>
+    </div>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

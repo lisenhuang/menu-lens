@@ -77,10 +77,10 @@ svg{display:block;width:1.125rem;height:1.125rem;flex:none}
 .section-top .eyebrow,.page-kicker{margin-bottom:.35rem}
 .dish-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.05rem}
 .dish-card{min-width:0;border:1px solid var(--line);border-radius:17px;overflow:hidden;background:var(--panel);display:block;transition:border-color .18s,box-shadow .18s}
-a.dish-card:hover{border-color:var(--green);box-shadow:var(--shadow)}
-.dish-image{width:100%;aspect-ratio:1.76;position:relative;overflow:hidden;background:var(--soft)}
+.menu-card:has(a:hover){border-color:var(--green);box-shadow:var(--shadow)}
+.dish-image{display:block;width:100%;aspect-ratio:1.76;position:relative;overflow:hidden;background:var(--soft)}
 .dish-image img{display:block;width:100%;height:100%;object-fit:cover;transition:transform .28s}
-a.dish-card:hover img{transform:scale(1.045)}
+.menu-card .dish-image:hover img{transform:scale(1.045)}
 .dish-body{padding:.95rem 1rem 1.05rem;display:grid;grid-template-columns:1fr auto;gap:.28rem .6rem;align-items:baseline}
 .dish-body .eyebrow{grid-column:1/-1;font-size:.69rem}
 .dish-body h3{font-size:1.28rem;line-height:1.18}
@@ -255,3 +255,15 @@ dialog .btn{max-width:100%;white-space:normal}
 .history-calls li{padding:.55rem .65rem;background:var(--wash);border-radius:8px;margin:.3rem 0}
 #history-message:not(:empty){margin:.6rem 0;color:var(--muted)}
 @media(max-width:860px){.admin-layout{grid-template-columns:1fr}.admin-layout .admin-panel{max-width:none}}
+
+
+a[data-view-image]{cursor:zoom-in}
+a[data-view-image]:focus-visible{outline-offset:-3px}
+.hero-photo{position:absolute;inset:0}
+.hero-figure .photo-badge,.hero-figure figcaption{pointer-events:none}
+html:has(#image-viewer[open]){overflow:hidden}
+#image-viewer{position:fixed;inset:0;width:100%;height:100%;height:100dvh;max-width:none;max-height:none;margin:0;padding:0;border:0;border-radius:0;background:#111}
+#image-viewer::backdrop{background:#111}
+.image-stage{position:relative;display:grid;place-items:center;width:100%;height:100%;background:#111;overscroll-behavior:contain}
+.image-stage img{display:block;width:100%;height:100%;min-width:0;min-height:0;object-fit:contain;cursor:zoom-out}
+.image-stage .icon-button{position:absolute;top:max(.75rem,env(safe-area-inset-top));right:max(.75rem,env(safe-area-inset-right));width:44px;height:44px;color:white;background:#151515d9;border:1px solid #ffffff75}

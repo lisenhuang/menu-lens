@@ -153,16 +153,47 @@ function page(title,kicker,intro,body,back='') {
     <h1 class="page-title">${title}</h1><p class="page-intro">${intro}</p></div>${body}</div>`;
 }
 
+const viewer=$('#image-viewer');
+const stage=$('.image-stage',viewer);
+const fullImage=$('img',stage);
+let imageOpener;
+let nativeFullscreen=false;
+main.addEventListener('click',event=>{
+  const link=event.target.closest('a[data-view-image]');
+  if (!link || event.button!==0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  imageOpener=link;
+  fullImage.alt=$('img',link).alt;
+  fullImage.src=link.href;
+  viewer.showModal();
+  // The dialog also fills the viewport on browsers without element fullscreen.
+  if (document.fullscreenEnabled && !document.fullscreenElement) stage.requestFullscreen().catch(()=>{});
+});
+$('button',stage).addEventListener('click',()=>viewer.close());
+stage.addEventListener('click',event=>{if (event.target===stage || event.target===fullImage) viewer.close();});
+document.addEventListener('fullscreenchange',()=>{
+  if (document.fullscreenElement===stage) nativeFullscreen=true;
+  else if (nativeFullscreen) {
+    nativeFullscreen=false;
+    if (viewer.open) viewer.close();
+  }
+});
+viewer.addEventListener('close',()=>{
+  if (document.fullscreenElement===stage) document.exitFullscreen().catch(()=>{});
+  fullImage.removeAttribute('src');
+  imageOpener?.focus({preventScroll:true});
+});
+
 function dishCard(dish) {
-  return `<article class="dish-card" id="${escape(dish.id)}"><div class="dish-image">
-    <img src="${escape(dish.image)}" alt="AI illustration of ${escape(dish.name)}" width="780" height="500" loading="lazy"></div>
+  return `<article class="dish-card" id="${escape(dish.id)}"><a class="dish-image" href="${escape(dish.image)}" data-view-image aria-haspopup="dialog">
+    <img src="${escape(dish.image)}" alt="AI illustration of ${escape(dish.name)}" width="780" height="500" loading="lazy"></a>
     <div class="dish-body"><h3>${escape(dish.name)}</h3>${dish.price ? `<span class="price">${escape(dish.price)}</span>` : ''}
     ${dish.description ? `<p class="description">${escape(dish.description)}</p>` : ''}</div></article>`;
 }
 function listing(menu) {
-  return `<a class="dish-card menu-card" href="/menu/${escape(menu.id)}"><div class="dish-image"><img src="${escape(menu.cover)}" alt="" width="780" height="500" loading="lazy"></div>
-  <div class="dish-body"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
-    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}</p></div></div></a>`;
+  return `<article class="dish-card menu-card"><a class="dish-image" href="${escape(menu.cover)}" data-view-image aria-haspopup="dialog"><img src="${escape(menu.cover)}" alt="Cover photo for ${escape(menu.restaurant.name)}" width="780" height="500" loading="lazy"></a>
+  <a class="dish-body" href="/menu/${escape(menu.id)}"><div><h3>${escape(menu.restaurant.name)}</h3><p>${escape(menu.restaurant.address)}</p>
+    <p>Photographed ${dateLabel(menu.date)} · ${menu.count} ${menu.count === 1 ? 'dish' : 'dishes'}</p></div></a></article>`;
 }
 async function home() {
   try {
@@ -223,7 +254,7 @@ async function showMenu(id) {
     <p class="hero-note">${icon('calendar')} Photographed ${dateLabel(menu.date)}</p>
     <div class="inline-actions"><button type="button" class="btn primary" id="share">${icon('link')} Copy link</button>
     ${mapsLink(menu.restaurant.name,menu.restaurant.address,menu.restaurant.placeId,menu.restaurant.pin)}
-    </div></div><img src="${escape(menu.cover)}" alt="AI illustration of ${escape(menu.dishes[0].name)}" width="780" height="500"></section>
+    </div></div><a href="${escape(menu.cover)}" data-view-image aria-haspopup="dialog"><img src="${escape(menu.cover)}" alt="AI illustration of ${escape(menu.dishes[0].name)}" width="780" height="500"></a></section>
     ${notice('Dish images are AI illustrations. Confirm current prices, availability and allergens with the restaurant.','sparkles')}
     ${sections.length>1 ? `<nav aria-label="Menu sections" class="menu-jumps">${sections.map((section,i)=>`<a href="#section-${i}">${escape(section || 'Menu')}</a>`).join('')}</nav>` : ''}
     ${sections.map((section,i)=>`<section class="menu-section" id="section-${i}"><h2>${escape(section || 'Menu')}</h2><div class="dish-grid">${menu.dishes.filter(dish=>dish.section===section).map(dishCard).join('')}</div></section>`).join('')}
@@ -236,7 +267,7 @@ async function showMenu(id) {
   originals?.addEventListener('toggle',()=>{
     if (!originals.open || originals.querySelector('img')) return;
     $('.original-pages',originals).innerHTML=menu.originals.map((url,i)=>
-      `<a href="${escape(url)}" target="_blank" rel="noopener"><img src="${escape(url)}" loading="lazy" alt="Original menu page ${i+1} from ${escape(menu.restaurant.name)}"><span>Open page ${i+1} ${icon('external')}</span></a>`).join('');
+      `<a href="${escape(url)}" data-view-image aria-haspopup="dialog"><img src="${escape(url)}" loading="lazy" alt="Original menu page ${i+1} from ${escape(menu.restaurant.name)}"><span>View page ${i+1} full screen</span></a>`).join('');
   });
   $('#share').addEventListener('click',()=>share());
   if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView();
@@ -250,7 +281,7 @@ function privacy() {
       <p>Upload restaurant menus you are allowed to share. Leave out photos of people, receipts, and any personal information. Remove private details from the photos before uploading.</p>
       <p>OpenAI reads your menu photos. Photos stay private while the menu is being prepared. If reading fails, you can retry from the same browser within 24 hours of uploading. Once the menu is published, anyone can open the Original menu section to see the submitted photos. Unpublished drafts expire, and photos from menus that already picture every dish are discarded.</p>
       <p>Save the menu link to return to your draft. A cookie lets you open it in the browser you used to upload.</p>
-      <p>Menu Lens stores the requesting IP address alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
+      <p>Menu Lens stores the requesting IP address and its approximate city, when supplied by Cloudflare, alongside generation times and AI usage costs. Only signed-in administrators can view these records.</p>
       <p>GPS is optional and stays in your browser. Your browser uses it to compare your position with the restaurant coordinates when available.</p>
       <p>Cloudflare Turnstile verifies submissions. Searching in Google Maps sends your query to Google.</p>
       <p>New Zealand restaurant search uses <a class="text-link" href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>. The <a class="text-link" href="/data/nz-restaurants.json">New Zealand restaurant index</a> is available under the Open Database Licence.</p>
@@ -328,7 +359,7 @@ function uploadStep() {
 function updateUpload() {
   const list=$('#selected-files');
   if (!list) return;
-  list.innerHTML=state.files.map((file,i)=>`<div class="file-row"><img src="${file.url}" alt=""><span class="truncate">${escape(file.name)}</span>
+  list.innerHTML=state.files.map((file,i)=>`<div class="file-row"><a href="${file.url}" data-view-image aria-haspopup="dialog"><img src="${file.url}" alt="Preview ${escape(file.name)}"></a><span class="truncate">${escape(file.name)}</span>
     <button type="button" class="icon-button" data-remove="${i}" aria-label="Remove ${escape(file.name)}">${icon('close')}</button></div>`).join('');
   const batch=state.preparing;
   if (batch) {
@@ -827,7 +858,7 @@ try {
 
 const route = location.pathname.replace(/\/$/,'') || '/';
 if (route==='/') void home();
-else if (route==='/admin') void import('./admin.js?v=2').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
+else if (route==='/admin') void import('./admin.js?v=3').then(({openAdmin})=>openAdmin({api,page,loadTurnstile,escape}));
 else if (route==='/create') buildFlow();
 else if (route==='/explore') void explore();
 else if (route==='/privacy') privacy();
