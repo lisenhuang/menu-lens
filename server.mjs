@@ -22,7 +22,6 @@ const dataDir = environment.DATA_DIR || join(root,'.local');
 const liveOrigin = (environment.PUBLIC_ORIGIN || '').replace(/\/$/,'');
 const ready = Boolean(environment.R2_GATEWAY_URL && environment.R2_GATEWAY_SECRET && environment.OPENAI_API_KEY && environment.TURNSTILE_SITE_KEY && environment.TURNSTILE_SECRET && environment.TURNSTILE_HOSTNAME);
 const maxDishes = 100;
-const dayLimit = Number(environment.DAILY_IMAGE_LIMIT || 120);
 const pepper = randomBytes(24).toString('hex');
 mkdirSync(dataDir,{recursive:true});
 const db = new DatabaseSync(join(dataDir,'menu.sqlite'));
@@ -405,7 +404,6 @@ async function runQueue() {
             const key=dishKey(row.id,item.i);
             // A restart can land between a successful R2 write and its SQLite checkpoint.
             if (!await objectExists(key)) {
-              if (!rate('images:daily',dayLimit,86_400_000)) throw new RequestError(429,'Daily image capacity reached.');
               const bytes=await history.measure(row.id,'image',item.dish.name,imageConfig.model,imageConfig.quality,received=>{
                 notifyProgress(row.id);
                 return generateDish(item.dish,imageConfig,received);

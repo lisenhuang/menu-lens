@@ -356,6 +356,8 @@ test('private uploads and approved illustrations finish with no client connected
   ledger.prepare("UPDATE sessions SET expires=0 WHERE id=(SELECT owner FROM drafts WHERE id=?)").run(kept.id);
   assert.equal((await request(keptPath,kept.cookie)).status,404);
   assert.equal((await retryRead(1)).status,403);
+  // Older installations can still have a full image counter when they upgrade.
+  ledger.prepare("INSERT OR REPLACE INTO counters(id,count,expires) VALUES ('images:daily',120,?)").run(Date.now()+86_400_000);
   ledger.close();
   await t.test('automatic publication survives a restart without a client or a second submission',async()=>{
     visionResult=menu;
