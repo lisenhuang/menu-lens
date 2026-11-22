@@ -300,6 +300,12 @@ html:has(#image-viewer[open]){overflow:hidden}
 .visual-menu .menu-cover>a{height:100%}
 .visual-menu .menu-cover img{display:block}
 .visual-menu .dish-body{overflow-wrap:anywhere}
+@media(width > 560px){
+  .visual-menu .dish-body{display:flex;flex-wrap:wrap}
+  .visual-menu .dish-body h3{flex:1 1 12ch;min-width:0}
+  .visual-menu .price{max-width:100%;text-align:left}
+  .visual-menu .description{flex-basis:100%;min-width:0}
+}
 @media(max-width:560px){
   .visual-menu:has(.live-photos) .menu-cover{display:grid;grid-template-columns:minmax(0,1fr) 6rem;align-items:start;gap:.24rem .65rem;padding:1rem}
   .visual-menu:has(.live-photos) .menu-cover-copy{display:contents}
