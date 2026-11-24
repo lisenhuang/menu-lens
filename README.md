@@ -1,5 +1,7 @@
 # Menu Lens
 
+> **This repository is archived.** Menu Lens development has moved to the [Rails and Hotwire repository](https://github.com/lisenhuang/menu-lens-rails). This repository preserves the original Node.js implementation. [Visit Menu Lens](https://menu.9l.nz/).
+
 Turn a photo of a restaurant menu into a public, dated menu with an AI illustration for every dish. Menu Lens reads the original names, descriptions and printed prices, then illustrates and publishes the menu automatically. [Open Menu Lens](https://menu.9l.nz/)
 
 [![Menu Lens homepage with a bowl of pappardelle](docs/screenshots/home.jpg)](https://menu.9l.nz/)
